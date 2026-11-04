@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import '../api.dart';
 import '../common.dart';
 import '../i18n.dart';
@@ -139,6 +141,37 @@ class _ChatPageState extends State<ChatPage> {
         child: const Center(child: LogoMark(size: 20)),
       );
 
+  Widget _markdown(String text) {
+    const base = TextStyle(color: cInk, fontSize: 15.5, height: 1.4);
+    return MarkdownBody(
+      data: text.replaceAll('\r\n', '\n'),
+      selectable: true,
+      softLineBreak: true,
+      extensionSet: md.ExtensionSet.gitHubFlavored,
+      styleSheet: MarkdownStyleSheet(
+        p: base,
+        strong: base.copyWith(fontWeight: FontWeight.w800),
+        em: base.copyWith(fontStyle: FontStyle.italic),
+        h1: base.copyWith(fontSize: 20, fontWeight: FontWeight.w800, color: cDark),
+        h2: base.copyWith(fontSize: 18, fontWeight: FontWeight.w800, color: cDark),
+        h3: base.copyWith(fontSize: 16.5, fontWeight: FontWeight.w700, color: cDark),
+        listBullet: base,
+        listIndent: 20,
+        blockSpacing: 8,
+        code: base.copyWith(fontFamily: 'monospace', backgroundColor: cDark.withOpacity(0.06)),
+        tableHead: base.copyWith(fontWeight: FontWeight.w800),
+        tableBody: base,
+        tableBorder: TableBorder.all(color: cDark.withOpacity(0.2)),
+        tableHeadAlign: TextAlign.left,
+        tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        blockquoteDecoration: BoxDecoration(
+          color: cDark.withOpacity(0.05),
+          border: Border(left: BorderSide(color: cAccent, width: 3)),
+        ),
+      ),
+    );
+  }
+
   Widget _bubble(Map<String, String> m) {
     final u = m['role'] == 'user';
     final bubble = Container(
@@ -156,8 +189,10 @@ class _ChatPageState extends State<ChatPage> {
         border: u ? null : Border.all(color: cDark.withOpacity(0.08)),
         boxShadow: [BoxShadow(color: cDark.withOpacity(0.07), blurRadius: 12, offset: const Offset(0, 5))],
       ),
-      child: SelectableText(m['content'] ?? '',
-          style: TextStyle(color: u ? Colors.white : cInk, fontSize: 15.5, height: 1.4)),
+      child: u
+          ? SelectableText(m['content'] ?? '',
+              style: const TextStyle(color: Colors.white, fontSize: 15.5, height: 1.4))
+          : _markdown(m['content'] ?? ''),
     );
     return Reveal(
       dy: 14,
