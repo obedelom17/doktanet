@@ -36,6 +36,8 @@ class Api {
 
   static String avatarUrl(String id, int v) => uri('/avatar/$id', {'v': '$v'}).toString();
 
+  static Uri documentUrl(String id) => uri('/documents/$id', {'t': token ?? ''});
+
   static Uri printUrl(String id) => uri('/prescriptions/$id/print', {'t': token ?? ''});
 
   static Future<dynamic> _send(String method, String path, {Map<String, String>? query, Object? body}) async {

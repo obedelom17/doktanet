@@ -13,6 +13,7 @@ class AdminHome extends StatelessWidget {
         TabDef("Comptes", Icons.manage_accounts_outlined, _Users()),
         TabDef("Litiges", Icons.flag_outlined, _Reports()),
         TabDef("Statistiques", Icons.bar_chart_rounded, _Stats()),
+        TabDef("Suivi", Icons.fact_check_outlined, _Follow()),
         TabDef("Assistant", Icons.chat_bubble_outline_rounded, ChatPage(), narrow: true),
       ]);
 }
@@ -294,6 +295,101 @@ class _Reports extends StatelessWidget {
                     ),
                 ]),
               )]),
+          ]),
+        ),
+      );
+}
+
+class _Follow extends StatelessWidget {
+  const _Follow();
+  @override
+  Widget build(BuildContext context) => DefaultTabController(
+        length: 2,
+        child: Column(children: [
+          Material(
+            color: Colors.white,
+            child: TabBar(
+              labelColor: cMid,
+              indicatorColor: cMid,
+              tabs: [Tab(text: tr("Remboursements")), Tab(text: tr("Journal d'audit"))],
+            ),
+          ),
+          const Expanded(child: TabBarView(children: [_Refunds(), _Audit()])),
+        ]),
+      );
+}
+
+class _Refunds extends StatelessWidget {
+  const _Refunds();
+
+  @override
+  Widget build(BuildContext context) => Load<List<dynamic>>(
+        load: () async => (await Api.get('/admin/refunds')) as List,
+        builder: (c, list, reload) => RefreshIndicator(
+          onRefresh: () async => reload(),
+          child: ListView(padding: const EdgeInsets.all(16), children: [
+            sectionTitle("Remboursements", icon: Icons.currency_exchange_rounded),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(tr("Remboursez le patient par mobile money, puis marquez la ligne comme faite."), style: const TextStyle(color: cMuted)),
+            ),
+            if (list.isEmpty) const Empty("Aucun remboursement.", icon: Icons.task_alt_rounded),
+            ResponsiveGrid(children: [
+              for (var i = 0; i < list.length; i++)
+                AppCard(
+                  index: i,
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Expanded(
+                        child: Text('${list[i]['patient_name']}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17, color: cDark)),
+                      ),
+                      chip('${list[i]['payment_status']}'),
+                    ]),
+                    const SizedBox(height: 6),
+                    Text('${list[i]['amount']} FCFA - Dr ${list[i]['doctor_name']}'),
+                    InfoRow(Icons.phone_outlined, '${list[i]['patient_phone'] ?? '-'}'),
+                    InfoRow(Icons.schedule_rounded, fmtDt(list[i]['starts_at'])),
+                    if (list[i]['payment_status'] == 'refund_due')
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: ElevatedButton.icon(
+                          icon: const Icon(Icons.check_circle_outline),
+                          onPressed: () => guard(c, () async {
+                            await Api.post('/admin/refunds/${list[i]['id']}/done');
+                            reload();
+                          }),
+                          label: Text(tr("Marquer comme remboursé")),
+                        ),
+                      ),
+                  ]),
+                ),
+            ]),
+          ]),
+        ),
+      );
+}
+
+class _Audit extends StatelessWidget {
+  const _Audit();
+
+  @override
+  Widget build(BuildContext context) => Load<List<dynamic>>(
+        load: () async => (await Api.get('/admin/audit')) as List,
+        builder: (c, list, reload) => RefreshIndicator(
+          onRefresh: () async => reload(),
+          child: ListView(padding: const EdgeInsets.all(16), children: [
+            sectionTitle("Journal d'audit", icon: Icons.history_rounded),
+            if (list.isEmpty) const Empty("Aucune activité.", icon: Icons.history_rounded),
+            for (final x in list)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  dense: true,
+                  title: Text('${x['action']}', style: const TextStyle(fontWeight: FontWeight.w700, color: cDark)),
+                  subtitle: Text('${x['full_name'] ?? '-'} (${x['role'] ?? '-'})  ${x['target_type'] ?? ''} ${x['target_id'] ?? ''}'),
+                  trailing: Text(fmtDt(x['created_at']), style: const TextStyle(color: cMuted, fontSize: 12)),
+                ),
+              ),
           ]),
         ),
       );

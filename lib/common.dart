@@ -3,6 +3,7 @@ import 'pattern.dart';
 import 'screens/account.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:js_interop';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -13,6 +14,8 @@ import 'api.dart';
 import 'i18n.dart';
 import 'session.dart';
 import 'theme.dart';
+
+const cStar = Color(0xFFF2B01E);
 
 String fmtDt(dynamic iso) => DateFormat('dd/MM/yyyy HH:mm').format(DateTime.parse('$iso').toLocal());
 String fmtHm(dynamic iso) => DateFormat('HH:mm').format(DateTime.parse('$iso').toLocal());
@@ -52,6 +55,8 @@ const statusFr = {
   'paid': 'Payé',
   'open': 'Ouvert',
   'resolved': 'Résolu',
+  'refund_due': 'Remboursement dû',
+  'refunded': 'Remboursé',
 };
 
 Color _statusColor(String s) {
@@ -60,6 +65,7 @@ Color _statusColor(String s) {
     case 'ready':
     case 'delivered':
     case 'paid':
+    case 'refunded':
     case 'resolved':
       return cOk;
     case 'cancelled':
@@ -900,6 +906,8 @@ class Shell extends StatefulWidget {
 class _ShellState extends State<Shell> {
   int i = 0;
   int unread = 0;
+  int notif = 0;
+  bool offline = false;
   Timer? _unreadTimer;
   void go(int v) => setState(() => i = v);
 
@@ -918,15 +926,78 @@ class _ShellState extends State<Shell> {
   }
 
   Future<void> _checkUnread() async {
+    if (!web.window.navigator.onLine) {
+      if (mounted && !offline) setState(() => offline = true);
+      return;
+    }
     try {
       final r = await Api.get('/me/unread');
       final n = int.tryParse('${r['count']}') ?? 0;
+      final nn = int.tryParse('${r['notifications']}') ?? 0;
       if (!mounted) return;
       if (n > unread) toast(context, tr("Nouveau message reçu. Ouvrez Messages dans votre rendez-vous."));
-      web.document.title = n > 0 ? '($n) DoktaNet' : 'DoktaNet';
-      if (n != unread) setState(() => unread = n);
-    } catch (_) {}
+      web.document.title = (n + nn) > 0 ? '(${n + nn}) DoktaNet' : 'DoktaNet';
+      if (n != unread || nn != notif || offline) {
+        setState(() {
+          unread = n;
+          notif = nn;
+          offline = false;
+        });
+      }
+    } on ApiException catch (e) {
+      // Session révoquée (mot de passe changé, déconnexion de tous les appareils, compte supprimé).
+      if (e.message == 'Non connecté') await session.logout();
+    } catch (_) {
+      if (mounted && !offline) setState(() => offline = true);
+    }
   }
+
+  Future<void> _openNotifications() async {
+    await guard(context, () async {
+      final list = (await Api.get('/me/notifications')) as List;
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (d) => AlertDialog(
+          title: Text(tr("Notifications")),
+          content: SizedBox(
+            width: 420,
+            child: list.isEmpty
+                ? Text(tr("Aucune notification."))
+                : ListView(shrinkWrap: true, children: [
+                    for (final n in list)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(n['read_at'] == null ? Icons.circle : Icons.circle_outlined, size: 10, color: cAccent),
+                        title: Text('${n['title']}', style: TextStyle(fontWeight: n['read_at'] == null ? FontWeight.w800 : FontWeight.w500)),
+                        subtitle: Text('${n['body'] ?? ''}\n${fmtDt(n['created_at'])}'),
+                        isThreeLine: true,
+                      ),
+                  ]),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(d), child: Text(tr("Fermer")))],
+        ),
+      );
+      await Api.post('/me/notifications/read');
+      if (mounted) setState(() => notif = 0);
+      web.document.title = unread > 0 ? '($unread) DoktaNet' : 'DoktaNet';
+    });
+  }
+
+  Widget _offlineBar() => Container(
+        width: double.infinity,
+        color: const Color(0xFFB77700),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(children: [
+          const Icon(Icons.wifi_off_rounded, color: Colors.white, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(tr("Connexion perdue. Les données se rechargeront au retour du réseau."),
+                style: const TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ]),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -948,7 +1019,7 @@ class _ShellState extends State<Shell> {
             : widget.tabs[i].page,
       ),
     );
-    final body = DecoratedBox(
+    final inner = DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -965,6 +1036,7 @@ class _ShellState extends State<Shell> {
         ShellScope(go: go, child: page),
       ]),
     );
+    final body = offline ? Column(children: [_offlineBar(), Expanded(child: inner)]) : inner;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -991,6 +1063,15 @@ class _ShellState extends State<Shell> {
           const InstallButton(),
           const LangToggle(),
           const SizedBox(width: 4),
+          IconButton(
+            tooltip: tr("Notifications"),
+            onPressed: _openNotifications,
+            icon: Badge(
+              isLabelVisible: notif > 0,
+              label: Text('$notif'),
+              child: const Icon(Icons.notifications_none_rounded),
+            ),
+          ),
           IconButton(
             tooltip: tr("Mon compte"),
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AccountPage())),
@@ -1151,3 +1232,179 @@ class ResponsiveGrid extends StatelessWidget {
 
 /// Marge horizontale des pages : plus large sur grand écran.
 double hPad(BuildContext context) => MediaQuery.of(context).size.width >= 840 ? 28.0 : 16.0;
+
+// ---------------------------------------------------------------------------
+// Rendez-vous : reprogrammation, paiement, avis ; documents ; export
+// ---------------------------------------------------------------------------
+
+/// Choisit un nouveau jour puis un créneau libre du médecin et reprogramme le rendez-vous.
+Future<void> rescheduleAppointment(BuildContext c, {required String apptId, required String doctorId, required VoidCallback reload}) async {
+  final now = DateTime.now();
+  final day = await showDatePicker(
+    context: c,
+    initialDate: now.add(const Duration(days: 1)),
+    firstDate: now,
+    lastDate: now.add(const Duration(days: 60)),
+  );
+  if (day == null || !c.mounted) return;
+  await guard(c, () async {
+    final r = await Api.get('/doctors/$doctorId/slots', {'date': DateFormat('yyyy-MM-dd').format(day)});
+    final slots = (r['slots'] as List).map((e) => '$e').toList();
+    if (!c.mounted) return;
+    if (slots.isEmpty) {
+      toast(c, tr("Aucun créneau ce jour-là."));
+      return;
+    }
+    final pick = await showDialog<String>(
+      context: c,
+      builder: (d) => SimpleDialog(
+        title: Text(tr("Choisissez un créneau")),
+        contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+        children: [
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final s in slots) ActionChip(label: Text(fmtHm(s)), onPressed: () => Navigator.pop(d, s)),
+          ]),
+        ],
+      ),
+    );
+    if (pick == null || !c.mounted) return;
+    await Api.post('/appointments/$apptId/reschedule', {'starts_at': pick});
+    if (c.mounted) toast(c, tr("Rendez-vous reprogrammé"));
+    reload();
+  });
+}
+
+/// Paiement mobile money (T-Money, Flooz) vers [path] (ex. /appointments/ID/pay).
+Future<void> payMobileMoney(BuildContext context, {required String path, required dynamic amount, required VoidCallback reload}) async {
+  final phone = TextEditingController();
+  String provider = 'T-Money';
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (d) => StatefulBuilder(
+      builder: (d, setS) => AlertDialog(
+        title: Text(tr("Payer {t} FCFA", {'t': amount})),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          DropdownButtonFormField<String>(
+            value: provider,
+            decoration: InputDecoration(labelText: tr("Opérateur")),
+            items: const [
+              DropdownMenuItem(value: 'T-Money', child: Text('T-Money')),
+              DropdownMenuItem(value: 'Flooz', child: Text('Flooz')),
+            ],
+            onChanged: (v) => setS(() => provider = v ?? 'T-Money'),
+          ),
+          const SizedBox(height: 12),
+          TextField(controller: phone, keyboardType: TextInputType.phone, decoration: InputDecoration(labelText: tr("Numéro mobile money"))),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: Text(tr("Payer"))),
+        ],
+      ),
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+  await guard(context, () async {
+    final r = await Api.post(path, {'phone': phone.text.trim(), 'provider': provider});
+    if (context.mounted) toast(context, r['status'] == 'paid' ? tr("Paiement confirmé") : tr("Paiement en attente de confirmation"));
+    reload();
+  });
+}
+
+/// Note (1 à 5 étoiles) et commentaire sur une consultation terminée.
+Future<void> rateAppointment(BuildContext c, String apptId, VoidCallback reload) async {
+  int stars = 5;
+  final comment = TextEditingController();
+  final ok = await showDialog<bool>(
+    context: c,
+    builder: (d) => StatefulBuilder(
+      builder: (d, setS) => AlertDialog(
+        title: Text(tr("Noter la consultation")),
+        content: SizedBox(
+          width: 380,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              for (var i = 1; i <= 5; i++)
+                IconButton(
+                  onPressed: () => setS(() => stars = i),
+                  icon: Icon(i <= stars ? Icons.star_rounded : Icons.star_border_rounded, color: cStar, size: 34),
+                ),
+            ]),
+            tf(comment, "Commentaire (facultatif)", lines: 3),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: Text(tr("Envoyer"))),
+        ],
+      ),
+    ),
+  );
+  if (ok != true || !c.mounted) return;
+  await guard(c, () async {
+    await Api.post('/appointments/$apptId/review', {'rating': stars, 'comment': comment.text.trim()});
+    if (c.mounted) toast(c, tr("Merci pour votre avis"));
+    reload();
+  });
+}
+
+Future<void> showDoctorReviews(BuildContext c, String doctorId, String name) async {
+  await guard(c, () async {
+    final list = (await Api.get('/doctors/$doctorId/reviews')) as List;
+    if (!c.mounted) return;
+    await showDialog<void>(
+      context: c,
+      builder: (d) => AlertDialog(
+        title: Text('Dr $name'),
+        content: SizedBox(
+          width: 420,
+          child: list.isEmpty
+              ? Text(tr("Aucun avis."))
+              : ListView(shrinkWrap: true, children: [
+                  for (final r in list)
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Row(children: [
+                        for (var i = 1; i <= 5; i++)
+                          Icon(i <= (int.tryParse('${r['rating']}') ?? 0) ? Icons.star_rounded : Icons.star_border_rounded, color: cStar, size: 18),
+                      ]),
+                      subtitle: Text('${r['author']} - ${DateFormat('dd/MM/yyyy').format(DateTime.parse('${r['created_at']}').toLocal())}'
+                          '${(r['comment'] ?? '').toString().isEmpty ? '' : '\n${r['comment']}'}'),
+                    ),
+                ]),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(d), child: Text(tr("Fermer")))],
+      ),
+    );
+  });
+}
+
+/// Choisit une photo de document (résultat d'analyse, examen) : 1 Mo max.
+Future<Map<String, String>?> pickDocument() async {
+  final x = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 1600, maxHeight: 1600, imageQuality: 75);
+  if (x == null) return null;
+  final bytes = await x.readAsBytes();
+  if (bytes.length > 1000000) throw ApiException('Fichier trop lourd (1 Mo max)');
+  final n = x.name.toLowerCase();
+  final mt = (x.mimeType != null && x.mimeType!.startsWith('image/'))
+      ? x.mimeType!
+      : (n.endsWith('.png') ? 'image/png' : (n.endsWith('.webp') ? 'image/webp' : 'image/jpeg'));
+  return {'name': x.name, 'file': 'data:$mt;base64,${base64Encode(bytes)}'};
+}
+
+Future<void> openDocument(String id) => launchUrl(Api.documentUrl(id), webOnlyWindowName: '_blank');
+
+/// Pages légales statiques (web/privacy.html, web/terms.html).
+Future<void> openLegal(String path) => launchUrl(Uri.base.resolve(path), webOnlyWindowName: '_blank');
+
+/// Télécharge un fichier texte généré côté navigateur.
+void downloadText(String filename, String content, {String mime = 'application/json'}) {
+  final blob = web.Blob([content.toJS].toJS, web.BlobPropertyBag(type: mime));
+  final url = web.URL.createObjectURL(blob);
+  final a = web.document.createElement('a') as web.HTMLAnchorElement;
+  a.href = url;
+  a.download = filename;
+  a.click();
+  web.URL.revokeObjectURL(url);
+}

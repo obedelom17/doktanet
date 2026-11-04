@@ -164,6 +164,15 @@ class _ApptCard extends StatelessWidget {
         ]),
         InfoRow(Icons.schedule_rounded, fmtDt(a['starts_at'])),
         if (a['status'] != 'cancelled')
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
+            child: Row(children: [
+              chip('${a['payment_status'] ?? 'unpaid'}'),
+              const SizedBox(width: 10),
+              Text('${a['amount'] ?? a['fee']} FCFA', style: const TextStyle(color: cMuted, fontWeight: FontWeight.w600)),
+            ]),
+          ),
+        if (a['status'] != 'cancelled')
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
@@ -193,6 +202,18 @@ class _ApptCard extends StatelessWidget {
                 onPressed: () => openRoom(context, a['id']),
                 label: Text(tr("Rejoindre")),
               ),
+              if (a['payment_status'] != 'paid')
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.phone_android_rounded),
+                  onPressed: () => payMobileMoney(context, path: '/appointments/${a['id']}/pay', amount: a['amount'] ?? a['fee'], reload: reload),
+                  label: Text(tr("Payer la consultation")),
+                ),
+              if (a['status'] == 'scheduled')
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.event_repeat_rounded),
+                  onPressed: () => rescheduleAppointment(context, apptId: '${a['id']}', doctorId: '${a['doctor_id']}', reload: reload),
+                  label: Text(tr("Reprogrammer")),
+                ),
               OutlinedButton(
                 onPressed: () => guard(context, () async {
                   await Api.post('/appointments/${a['id']}/status', {'status': 'cancelled'});
@@ -201,6 +222,15 @@ class _ApptCard extends StatelessWidget {
                 child: Text(tr("Annuler")),
               ),
             ]),
+          ),
+        if (a['status'] == 'done' && a['reviewed'] != true)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.star_rounded, color: cStar),
+              onPressed: () => rateAppointment(context, '${a['id']}', reload),
+              label: Text(tr("Noter la consultation")),
+            ),
           ),
       ]),
     );
@@ -424,6 +454,20 @@ class _DoctorsState extends State<_Doctors> {
                           InfoRow(Icons.location_on_outlined, '${docs[i]['city'] ?? ''}'),
                           InfoRow(Icons.workspace_premium_outlined,
                               tr("{y} ans d'expérience - {l}", {'y': docs[i]['experience_years'], 'l': docs[i]['languages']})),
+                          if ((int.tryParse('${docs[i]['review_count']}') ?? 0) > 0)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: InkWell(
+                                onTap: () => showDoctorReviews(c, '${docs[i]['id']}', '${docs[i]['full_name']}'),
+                                child: Row(children: [
+                                  const Icon(Icons.star_rounded, color: cStar, size: 20),
+                                  const SizedBox(width: 6),
+                                  Text('${docs[i]['rating']} / 5', style: const TextStyle(fontWeight: FontWeight.w800, color: cDark)),
+                                  const SizedBox(width: 6),
+                                  Text(tr("({n} avis)", {'n': docs[i]['review_count']}), style: const TextStyle(color: cMuted)),
+                                ]),
+                              ),
+                            ),
                           if ((docs[i]['bio'] ?? '').toString().isNotEmpty) InfoRow(Icons.notes_rounded, '${docs[i]['bio']}'),
                           const SizedBox(height: 12),
                           ElevatedButton.icon(
@@ -831,6 +875,73 @@ class _PatientProfileState extends State<_PatientProfile> {
           ),
         ]),
       ),
+      sectionTitle("Mes documents", icon: Icons.folder_open_rounded),
+      const _Documents(),
     ]);
+  }
+}
+
+class _Documents extends StatefulWidget {
+  const _Documents();
+  @override
+  State<_Documents> createState() => _DocumentsState();
+}
+
+class _DocumentsState extends State<_Documents> {
+  List<dynamic>? docs;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    await guard(context, () async {
+      docs = (await Api.get('/me/documents')) as List;
+    });
+    if (mounted) setState(() => docs ??= []);
+  }
+
+  Future<void> _add() => guard(context, () async {
+        final f = await pickDocument();
+        if (f == null) return;
+        await Api.post('/me/documents', f);
+        await _load();
+        if (mounted) toast(context, tr("Document ajouté"));
+      });
+
+  Future<void> _remove(dynamic d) => guard(context, () async {
+        await Api.post('/me/documents/${d['id']}/delete');
+        await _load();
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    final list = docs;
+    return AppCard(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(tr("Ajoutez vos résultats d'analyses ou examens (photo, 1 Mo max). Seuls vos médecins en rendez-vous peuvent les consulter.")),
+        const SizedBox(height: 12),
+        if (list == null)
+          const LinearProgressIndicator()
+        else if (list.isEmpty)
+          Text(tr("Aucun document."), style: const TextStyle(color: cMuted))
+        else
+          for (final d in list)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.insert_drive_file_outlined, color: cMid),
+              title: Text('${d['name']}', maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(fmtDt(d['created_at'])),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(tooltip: tr("Ouvrir"), icon: const Icon(Icons.open_in_new_rounded), onPressed: () => openDocument('${d['id']}')),
+                IconButton(tooltip: tr("Supprimer"), icon: const Icon(Icons.delete_outline), onPressed: () => _remove(d)),
+              ]),
+            ),
+        const SizedBox(height: 8),
+        PrimaryButton("Ajouter un document", icon: Icons.upload_file_rounded, expand: false, onPressed: _add),
+      ]),
+    );
   }
 }
