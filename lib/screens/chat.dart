@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import '../api.dart';
 import '../common.dart';
 import '../i18n.dart';
@@ -91,10 +93,36 @@ class _ChatPageState extends State<ChatPage> {
     await guard(context, () async {
       final body = <String, dynamic>{'message': t, 'lang': l10n.lang};
       if (conv != null) body['conversation_id'] = conv;
-      final r = await Api.post('/chat', body);
-      conv = '${r['conversation_id']}';
-      ChatPage.lastConv = conv;
-      msgs.add({'role': 'assistant', 'content': '${r['reply']}'});
+      var received = false;
+      msgs.add({'role': 'assistant', 'content': ''});
+      final idx = msgs.length - 1;
+      try {
+        await for (final ev in Api.postStream('/chat', {...body, 'stream': true})) {
+          if (ev['conversation_id'] != null) {
+            conv = '${ev['conversation_id']}';
+            ChatPage.lastConv = conv;
+          }
+          final tk = ev['t'];
+          if (tk != null && mounted) {
+            received = true;
+            setState(() => msgs[idx]['content'] = '${msgs[idx]['content']}$tk');
+            _down();
+          }
+          if (ev['error'] != null) throw ApiException('${ev['error']}');
+        }
+      } on OfflineException {
+        // Flux impossible (navigateur ou réseau) avant toute réception : repli sur la réponse complète, sans streaming.
+        if (received) rethrow;
+        msgs.removeAt(idx);
+        final r = await Api.post('/chat', body);
+        conv = '${r['conversation_id']}';
+        ChatPage.lastConv = conv;
+        msgs.add({'role': 'assistant', 'content': '${r['reply']}'});
+      } finally {
+        if (msgs.isNotEmpty && msgs.last['role'] == 'assistant' && (msgs.last['content'] ?? '').isEmpty) {
+          msgs.removeLast();
+        }
+      }
     });
     if (mounted) {
       setState(() => busy = false);
@@ -139,6 +167,57 @@ class _ChatPageState extends State<ChatPage> {
         child: const Center(child: LogoMark(size: 20)),
       );
 
+  Widget _markdown(String text) {
+    const base = TextStyle(color: cInk, fontSize: 15.5, height: 1.4);
+    return MarkdownBody(
+      data: text.replaceAll('\r\n', '\n'),
+      selectable: true,
+      softLineBreak: true,
+      extensionSet: md.ExtensionSet.gitHubFlavored,
+      styleSheet: MarkdownStyleSheet(
+        p: base,
+        strong: base.copyWith(fontWeight: FontWeight.w800),
+        em: base.copyWith(fontStyle: FontStyle.italic),
+        h1: base.copyWith(fontSize: 20, fontWeight: FontWeight.w800, color: cDark),
+        h2: base.copyWith(fontSize: 18, fontWeight: FontWeight.w800, color: cDark),
+        h3: base.copyWith(fontSize: 16.5, fontWeight: FontWeight.w700, color: cDark),
+        listBullet: base,
+        listIndent: 20,
+        blockSpacing: 8,
+        code: base.copyWith(fontFamily: 'monospace', backgroundColor: cDark.withOpacity(0.06)),
+        tableHead: base.copyWith(fontWeight: FontWeight.w800),
+        tableBody: base,
+        tableBorder: TableBorder.all(color: cDark.withOpacity(0.2)),
+        tableHeadAlign: TextAlign.left,
+        tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        blockquoteDecoration: BoxDecoration(
+          color: cDark.withOpacity(0.05),
+          border: Border(left: BorderSide(color: cAccent, width: 3)),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _flag(String text) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(tr("Signaler cette réponse")),
+        content: Text(tr("Cette réponse de l'assistant sera transmise à l'équipe pour vérification.")),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: Text(tr("Signaler"))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await guard(context, () async {
+      final ex = text.length > 400 ? text.substring(0, 400) : text;
+      await Api.post('/reports', {'reason': "Réponse de l'assistant IA signalée : $ex"});
+      if (mounted) toast(context, tr("Signalement envoyé"));
+    });
+  }
+
   Widget _bubble(Map<String, String> m) {
     final u = m['role'] == 'user';
     final bubble = Container(
@@ -156,8 +235,28 @@ class _ChatPageState extends State<ChatPage> {
         border: u ? null : Border.all(color: cDark.withOpacity(0.08)),
         boxShadow: [BoxShadow(color: cDark.withOpacity(0.07), blurRadius: 12, offset: const Offset(0, 5))],
       ),
-      child: SelectableText(m['content'] ?? '',
-          style: TextStyle(color: u ? Colors.white : cInk, fontSize: 15.5, height: 1.4)),
+      child: u
+          ? SelectableText(m['content'] ?? '',
+              style: const TextStyle(color: Colors.white, fontSize: 15.5, height: 1.4))
+          : Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              _markdown(m['content'] ?? ''),
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerRight,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => _flag(m['content'] ?? ''),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.flag_outlined, size: 15, color: cMuted),
+                      const SizedBox(width: 4),
+                      Text(tr("Signaler"), style: const TextStyle(fontSize: 12, color: cMuted)),
+                    ]),
+                  ),
+                ),
+              ),
+            ]),
     );
     return Reveal(
       dy: 14,
@@ -253,7 +352,7 @@ class _ChatPageState extends State<ChatPage> {
             ? _welcome()
             : ListView(controller: scroll, padding: const EdgeInsets.all(16), children: [
                 for (final m in msgs) _bubble(m),
-                if (busy) _typing(),
+                if (busy && !(msgs.isNotEmpty && msgs.last['role'] == 'assistant' && (msgs.last['content'] ?? '').isNotEmpty)) _typing(),
               ]),
       ),
       Container(

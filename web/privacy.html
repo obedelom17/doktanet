@@ -1,0 +1,62 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Politique de confidentialité - DoktaNet</title><meta name="robots" content="noindex"><style>
+:root{--dark:#0a3b50;--mid:#0e5976;--accent:#ff6f59;--bg:#f1f6f9;--ink:#0f2230;--muted:#5a6e7c}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1b24;--ink:#e6eef3;--muted:#9db3c0;--dark:#7fd0e8;--mid:#5cc8e0}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 system-ui,Arial,sans-serif}
+header{background:linear-gradient(135deg,#0a3b50,#0e5976);color:#fff;padding:28px 20px}
+header h1{margin:0;font-size:26px}header a{color:#fff;opacity:.85;font-size:14px}
+main{max-width:820px;margin:0 auto;padding:24px 20px 60px}
+h2{color:var(--dark);border-bottom:3px solid var(--accent);padding-bottom:6px;margin-top:34px;font-size:20px}
+.note{background:rgba(255,111,89,.12);border-left:4px solid var(--accent);padding:12px 14px;border-radius:8px;font-size:14px}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14.5px}th,td{border:1px solid rgba(14,89,118,.3);padding:8px;text-align:left;vertical-align:top}th{background:var(--mid);color:#fff}
+footer{color:var(--muted);font-size:13px;margin-top:30px}
+</style></head><body>
+<header><h1>Politique de confidentialité</h1><a href="/">Retour à DoktaNet</a></header><main>
+<p class="note"><b>Version 2026-11-v1.</b> Ce texte décrit le fonctionnement réel de l'application. Il doit être relu et complété (identité du responsable de traitement, coordonnées, formalités auprès de l'autorité de protection des données) par un juriste avant toute mise en production avec de vrais patients.</p>
+
+<h2>1. Qui est responsable de vos données ?</h2>
+<p>Le responsable du traitement est l'éditeur de DoktaNet : <b>[nom de la structure, adresse, email de contact à compléter]</b>. Cadre applicable : loi togolaise n°2019-014 du 29 octobre 2019 relative à la protection des données à caractère personnel (autorité : IPDCP).</p>
+
+<h2>2. Quelles données collectons-nous ?</h2>
+<table><tr><th>Catégorie</th><th>Exemples</th><th>Finalité</th></tr>
+<tr><td>Compte</td><td>Nom, email, téléphone, mot de passe (haché), rôle</td><td>Créer et sécuriser votre compte</td></tr>
+<tr><td>Santé (patients)</td><td>Date de naissance, allergies, antécédents, documents d'analyses, notes de consultation, ordonnances</td><td>Téléconsultation et suivi par le médecin que vous consultez</td></tr>
+<tr><td>Rendez-vous et échanges</td><td>Créneaux, messages avec le médecin, statut de paiement</td><td>Organiser et réaliser la consultation</td></tr>
+<tr><td>Paiement</td><td>Montant, opérateur, numéro mobile money transmis à l'opérateur</td><td>Régler consultations et commandes. Le numéro n'est pas conservé par DoktaNet.</td></tr>
+<tr><td>Assistant IA</td><td>Vos questions et les réponses</td><td>Orientation générale. Aucun diagnostic.</td></tr>
+<tr><td>Sécurité</td><td>Journal d'activité (connexions, accès aux dossiers), adresse IP pour limiter les tentatives</td><td>Détecter les abus, prouver qui a consulté quoi</td></tr></table>
+
+<h2>3. Base légale</h2>
+<p>Votre <b>consentement</b> (case cochée à l'inscription, enregistrée avec la version de ce texte) et l'<b>exécution du service</b> que vous demandez. Les données de santé ne servent qu'à la prise en charge médicale.</p>
+
+<h2>4. Qui y a accès ?</h2>
+<ul><li><b>Votre médecin</b> : uniquement s'il a un rendez-vous non annulé avec vous (dossier, documents). Chaque consultation de dossier ou de document est journalisée.</li>
+<li><b>La pharmacie</b> choisie : l'ordonnance de la commande.</li>
+<li><b>L'équipe d'administration</b> : validation des comptes, litiges, remboursements. Pas d'accès à vos messages ni à vos documents.</li>
+<li><b>Prestataires techniques (sous-traitants)</b> : Cloudflare (hébergement), Neon (base de données), Groq (assistant IA : seules vos questions et les informations nécessaires à la réponse sont envoyées), Jitsi ou Daily (visioconférence), PayGate (paiement mobile money), Resend (emails de notification et de réinitialisation).</li></ul>
+<p>Certains prestataires sont situés hors du Togo : vos données peuvent être transférées vers ces pays dans le cadre de ces services.</p>
+
+<h2>5. Combien de temps ?</h2>
+<ul><li>Compte actif : tant que le compte existe.</li>
+<li>Conversations avec l'assistant, rappels, documents, notifications : supprimés avec le compte.</li>
+<li>Ordonnances et rendez-vous passés : conservés sous forme anonymisée après suppression du compte, pour les obligations légales et la continuité des soins du médecin.</li>
+<li>Journal d'activité : 12 mois recommandés (à appliquer par l'exploitant).</li></ul>
+
+<h2>6. Vos droits</h2>
+<p>Depuis <b>Mon compte &gt; Mes données et sessions</b> :</p>
+<ul><li><b>Accès / portabilité</b> : « Télécharger mes données » (fichier JSON).</li>
+<li><b>Suppression</b> : « Supprimer mon compte » (avec votre mot de passe).</li>
+<li><b>Rectification</b> : modifiez votre profil à tout moment.</li>
+<li><b>Sécurité</b> : « Déconnecter tous mes appareils ».</li></ul>
+<p>Pour toute autre demande (opposition, limitation, réclamation) : <b>[email de contact à compléter]</b>. Vous pouvez aussi saisir l'autorité de protection des données.</p>
+
+<h2>7. Comment sont-elles protégées ?</h2>
+<ul><li>Connexion chiffrée (HTTPS). Mots de passe hachés (PBKDF2 salé), jamais stockés en clair.</li>
+<li>Messages et documents chiffrés avant stockage (AES-GCM) lorsque la clé de chiffrement est configurée.</li>
+<li>Authentification à deux facteurs (obligatoire pour médecins et administrateurs si activée), limitation des tentatives de connexion, sessions révocables.</li>
+<li>Ordonnances signées électroniquement et vérifiables.</li></ul>
+<p>Aucun système n'est infaillible : en cas d'incident touchant vos données, vous serez informé.</p>
+
+<h2>8. Urgences</h2>
+<p>DoktaNet ne remplace pas les urgences. En cas de douleur thoracique, difficulté à respirer, perte de connaissance, saignement important : allez aux urgences ou appelez les secours.</p>
+<footer>Dernière mise à jour : novembre 2026.</footer></main></body></html>

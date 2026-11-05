@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../api.dart';
 import '../common.dart';
@@ -91,11 +92,55 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   Future<void> _changePassword() => guard(context, () async {
-        await Api.post('/me/password', {'current': cur.text, 'next': nw.text});
+        final r = await Api.post('/me/password', {'current': cur.text, 'next': nw.text});
+        // Les autres appareils sont déconnectés : on garde cette session avec le nouveau jeton.
+        if (r is Map && r['token'] != null) await Api.setToken('${r['token']}');
         cur.clear();
         nw.clear();
         if (mounted) toast(context, tr("Mot de passe modifié"));
       });
+
+  Future<void> _export() => guard(context, () async {
+        final r = await Api.get('/me/export');
+        downloadText('doktanet-mes-donnees.json', const JsonEncoder.withIndent('  ').convert(r));
+        if (mounted) toast(context, tr("Export téléchargé"));
+      });
+
+  Future<void> _logoutAll() => guard(context, () async {
+        await Api.post('/auth/logout-all');
+        await session.logout();
+      });
+
+  Future<void> _deleteAccount() async {
+    final pw = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(tr("Supprimer mon compte")),
+        content: SizedBox(
+          width: 400,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(tr("Cette action est définitive. Vos rendez-vous à venir seront annulés, vos documents, rappels et conversations avec l'assistant supprimés. Les ordonnances et rendez-vous passés sont conservés sous forme anonymisée pour des raisons légales.")),
+            const SizedBox(height: 12),
+            tf(pw, "Mot de passe actuel", obscure: true),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(d, true),
+            child: Text(tr("Supprimer définitivement")),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await guard(context, () async {
+      await Api.post('/me/delete', {'password': pw.text});
+      await session.logout();
+    });
+  }
 
   Future<void> _report() => guard(context, () async {
         await Api.post('/reports', {'reason': reason.text.trim()});
@@ -186,6 +231,38 @@ class _AccountPageState extends State<AccountPage> {
                   tf(cur, "Mot de passe actuel", obscure: true),
                   tf(nw, "Nouveau mot de passe (8 caractères min.)", obscure: true),
                   PrimaryButton("Changer le mot de passe", icon: Icons.save_outlined, onPressed: _changePassword),
+                ]),
+              ),
+              sectionTitle("Mes données et sessions", icon: Icons.privacy_tip_outlined),
+              AppCard(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(tr("Téléchargez une copie de vos données, déconnectez vos autres appareils ou supprimez votre compte à tout moment.")),
+                  const SizedBox(height: 12),
+                  Wrap(spacing: 8, runSpacing: 8, children: [
+                    PrimaryButton("Télécharger mes données", icon: Icons.download_rounded, expand: false, onPressed: _export),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.devices_other_rounded),
+                      onPressed: _logoutAll,
+                      label: Text(tr("Déconnecter tous mes appareils")),
+                    ),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.policy_outlined),
+                      onPressed: () => openLegal('/privacy.html'),
+                      label: Text(tr("Politique de confidentialité")),
+                    ),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.gavel_rounded),
+                      onPressed: () => openLegal('/terms.html'),
+                      label: Text(tr("Conditions d'utilisation")),
+                    ),
+                    if (session.user?['role'] != 'admin')
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(foregroundColor: Colors.red.shade700),
+                        icon: const Icon(Icons.delete_forever_outlined),
+                        onPressed: _deleteAccount,
+                        label: Text(tr("Supprimer mon compte")),
+                      ),
+                  ]),
                 ]),
               ),
               sectionTitle("Signaler un problème", icon: Icons.flag_outlined),

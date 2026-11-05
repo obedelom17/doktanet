@@ -209,6 +209,14 @@
       };
     })();
   </script>
+  <script>
+    // Mode hors-ligne : service worker maison (le build utilise --pwa-strategy=none).
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('doktanet_sw.js').catch(function () {});
+      });
+    }
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

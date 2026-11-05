@@ -1,0 +1,15 @@
+name: rappels-rendez-vous
+# Envoie les rappels (notification + email) des rendez-vous des prochaines 24 h.
+# Secrets GitHub requis : APP_URL (ex. https://doktanet.pages.dev) et CRON_SECRET (identique à la variable Pages).
+# Remarque : GitHub peut retarder les tâches planifiées de quelques minutes et les suspend après 60 jours sans activité sur le dépôt.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Appeler l'API
+        run: |
+          curl -fsS -X POST "${{ secrets.APP_URL }}/api/cron/reminders" -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
