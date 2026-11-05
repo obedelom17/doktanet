@@ -47,7 +47,6 @@ class _Agenda extends StatelessWidget {
   Future<void> _record(BuildContext context, dynamic a) async {
     await guard(context, () async {
       final r = await Api.get('/doctor/patients/${a['patient_id']}/record');
-      final pdocs = (await Api.get('/doctor/patients/${a['patient_id']}/documents')) as List;
       if (!context.mounted) return;
       final p = r['patient'] ?? {};
       final rx = r['prescriptions'] as List;
@@ -67,20 +66,6 @@ class _Agenda extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Text('${fmtDt(x['created_at'])} - Dr ${x['doctor_name']}\n${itemsText(x['items'])}'),
-                ),
-              sectionTitle("Documents du patient"),
-              if (pdocs.isEmpty) Text(tr("Aucun")),
-              for (final x in pdocs)
-                ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: Text('${x['name']}', maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(fmtDt(x['created_at'])),
-                  trailing: IconButton(
-                    tooltip: tr("Ouvrir"),
-                    icon: const Icon(Icons.open_in_new_rounded),
-                    onPressed: () => openDocument('${x['id']}'),
-                  ),
                 ),
             ]),
           ),
@@ -105,8 +90,6 @@ class _Agenda extends StatelessWidget {
             chip('${a['status']}'),
           ]),
           if ((a['notes'] ?? '').toString().isNotEmpty) InfoRow(Icons.sticky_note_2_outlined, tr("Notes : {n}", {'n': a['notes']})),
-          if (a['status'] != 'cancelled')
-            Padding(padding: const EdgeInsets.only(top: 4), child: Row(children: [chip('${a['payment_status'] ?? 'unpaid'}')])),
           if (a['status'] != 'cancelled')
             Align(
               alignment: Alignment.centerLeft,
@@ -143,12 +126,6 @@ class _Agenda extends StatelessWidget {
                   },
                   label: Text(tr("Lancer")),
                 ),
-                if (a['status'] == 'scheduled')
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.event_repeat_rounded),
-                    onPressed: () => rescheduleAppointment(c, apptId: '${a['id']}', doctorId: '${session.user?['id']}', reload: reload),
-                    label: Text(tr("Reprogrammer")),
-                  ),
                 OutlinedButton.icon(icon: const Icon(Icons.folder_shared_outlined), onPressed: () => _record(c, a), label: Text(tr("Dossier"))),
                 OutlinedButton.icon(icon: const Icon(Icons.edit_note_rounded), onPressed: () => _notes(c, a, reload), label: Text(tr("Notes"))),
                 OutlinedButton.icon(

@@ -6,9 +6,7 @@ import '../common.dart';
 import '../i18n.dart';
 import '../session.dart';
 import '../theme.dart';
-import '../map_view.dart';
 import '../photos.dart';
-import '../rx_pdf.dart';
 import 'chat.dart';
 import 'thread.dart';
 
@@ -166,15 +164,6 @@ class _ApptCard extends StatelessWidget {
         ]),
         InfoRow(Icons.schedule_rounded, fmtDt(a['starts_at'])),
         if (a['status'] != 'cancelled')
-          Padding(
-            padding: const EdgeInsets.only(top: 4, bottom: 2),
-            child: Row(children: [
-              chip('${a['payment_status'] ?? 'unpaid'}'),
-              const SizedBox(width: 10),
-              Text('${a['amount'] ?? a['fee']} FCFA', style: const TextStyle(color: cMuted, fontWeight: FontWeight.w600)),
-            ]),
-          ),
-        if (a['status'] != 'cancelled')
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(
@@ -204,18 +193,6 @@ class _ApptCard extends StatelessWidget {
                 onPressed: () => openRoom(context, a['id']),
                 label: Text(tr("Rejoindre")),
               ),
-              if (a['payment_status'] != 'paid')
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.phone_android_rounded),
-                  onPressed: () => payMobileMoney(context, path: '/appointments/${a['id']}/pay', amount: a['amount'] ?? a['fee'], reload: reload),
-                  label: Text(tr("Payer la consultation")),
-                ),
-              if (a['status'] == 'scheduled')
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.event_repeat_rounded),
-                  onPressed: () => rescheduleAppointment(context, apptId: '${a['id']}', doctorId: '${a['doctor_id']}', reload: reload),
-                  label: Text(tr("Reprogrammer")),
-                ),
               OutlinedButton(
                 onPressed: () => guard(context, () async {
                   await Api.post('/appointments/${a['id']}/status', {'status': 'cancelled'});
@@ -224,15 +201,6 @@ class _ApptCard extends StatelessWidget {
                 child: Text(tr("Annuler")),
               ),
             ]),
-          ),
-        if (a['status'] == 'done' && a['reviewed'] != true)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: OutlinedButton.icon(
-              icon: const Icon(Icons.star_rounded, color: cStar),
-              onPressed: () => rateAppointment(context, '${a['id']}', reload),
-              label: Text(tr("Noter la consultation")),
-            ),
           ),
       ]),
     );
@@ -270,13 +238,8 @@ class _RxCard extends StatelessWidget {
           Wrap(spacing: 8, runSpacing: 8, children: [
             OutlinedButton.icon(
               icon: const Icon(Icons.picture_as_pdf_outlined),
-              onPressed: () => guard(context, () => downloadPrescriptionPdf('${r['id']}')),
-              label: Text(tr("Télécharger le PDF")),
-            ),
-            OutlinedButton.icon(
-              icon: const Icon(Icons.print_outlined),
               onPressed: () => openPrint(r['id']),
-              label: Text(tr("Imprimer")),
+              label: Text(tr("Ouvrir / PDF")),
             ),
             ElevatedButton.icon(
               icon: const Icon(Icons.send_rounded),
@@ -429,12 +392,6 @@ class _DoctorsState extends State<_Doctors> {
               onPressed: () => setState(() => version++),
               icon: const Icon(Icons.search_rounded),
             ),
-            const SizedBox(width: 6),
-            IconButton(
-              tooltip: showMap ? tr("Liste") : tr("Carte"),
-              onPressed: () => setState(() => showMap = !showMap),
-              icon: Icon(showMap ? Icons.view_list_rounded : Icons.map_outlined, color: cMid),
-            ),
           ]),
         ),
         Expanded(
@@ -467,20 +424,6 @@ class _DoctorsState extends State<_Doctors> {
                           InfoRow(Icons.location_on_outlined, '${docs[i]['city'] ?? ''}'),
                           InfoRow(Icons.workspace_premium_outlined,
                               tr("{y} ans d'expérience - {l}", {'y': docs[i]['experience_years'], 'l': docs[i]['languages']})),
-                          if ((int.tryParse('${docs[i]['review_count']}') ?? 0) > 0)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: InkWell(
-                                onTap: () => showDoctorReviews(c, '${docs[i]['id']}', '${docs[i]['full_name']}'),
-                                child: Row(children: [
-                                  const Icon(Icons.star_rounded, color: cStar, size: 20),
-                                  const SizedBox(width: 6),
-                                  Text('${docs[i]['rating']} / 5', style: const TextStyle(fontWeight: FontWeight.w800, color: cDark)),
-                                  const SizedBox(width: 6),
-                                  Text(tr("({n} avis)", {'n': docs[i]['review_count']}), style: const TextStyle(color: cMuted)),
-                                ]),
-                              ),
-                            ),
                           if ((docs[i]['bio'] ?? '').toString().isNotEmpty) InfoRow(Icons.notes_rounded, '${docs[i]['bio']}'),
                           const SizedBox(height: 12),
                           ElevatedButton.icon(
@@ -651,31 +594,6 @@ class PharmacyList extends StatefulWidget {
 class _PharmacyListState extends State<PharmacyList> {
   final cc = TextEditingController();
   int version = 0;
-  bool showMap = false;
-
-  Future<void> _showMap(dynamic p) async {
-    final qy = p['lat'] != null ? '${p['lat']},${p['lng']}' : Uri.encodeComponent('${p['name']} ${p['address'] ?? ''} ${p['city'] ?? ''}');
-    final gmaps = Uri.parse('https://www.google.com/maps/search/?api=1&query=$qy');
-    if (PharmacyMap.point(p) == null) {
-      await launchUrl(gmaps, webOnlyWindowName: '_blank');
-      return;
-    }
-    await showDialog<void>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: Text('${p['name']}'),
-        content: SizedBox(
-          width: 520,
-          height: 360,
-          child: ClipRRect(borderRadius: BorderRadius.circular(14), child: PharmacyMap(pharmacies: [p])),
-        ),
-        actions: [
-          TextButton(onPressed: () => launchUrl(gmaps, webOnlyWindowName: '_blank'), child: Text(tr("Itinéraire (Google Maps)"))),
-          TextButton(onPressed: () => Navigator.pop(d), child: Text(tr("Fermer"))),
-        ],
-      ),
-    );
-  }
 
   @override
   void dispose() {
@@ -780,20 +698,6 @@ class _PharmacyListState extends State<PharmacyList> {
             builder: (c, list, _) => list.isEmpty
                 ? ListView(padding: const EdgeInsets.all(16), children: const [Empty("Aucune pharmacie partenaire.", icon: Icons.storefront_outlined)])
                 : ListView(padding: EdgeInsets.fromLTRB(hPad(c), 12, hPad(c), 16), children: [
-                    if (showMap)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 14),
-                        child: SizedBox(
-                          height: 340,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(18),
-                            child: PharmacyMap(
-                              pharmacies: list,
-                              onTap: (p) => toast(c, '${p['name']} - ${p['address'] ?? ''} ${p['city'] ?? ''}'.trim()),
-                            ),
-                          ),
-                        ),
-                      ),
                     ResponsiveGrid(children: [for (var i = 0; i < list.length; i++)
                       AppCard(
                         index: i,
@@ -815,7 +719,11 @@ class _PharmacyListState extends State<PharmacyList> {
                           Wrap(spacing: 8, runSpacing: 8, children: [
                             OutlinedButton.icon(
                               icon: const Icon(Icons.map_outlined),
-                              onPressed: () => _showMap(list[i]),
+                              onPressed: () {
+                                final p = list[i];
+                                final qy = p['lat'] != null ? '${p['lat']},${p['lng']}' : Uri.encodeComponent('${p['name']} ${p['address'] ?? ''} ${p['city'] ?? ''}');
+                                launchUrl(Uri.parse('https://www.google.com/maps/search/?api=1&query=$qy'), webOnlyWindowName: '_blank');
+                              },
                               label: Text(tr("Voir sur la carte")),
                             ),
                             ElevatedButton.icon(
@@ -923,76 +831,6 @@ class _PatientProfileState extends State<_PatientProfile> {
           ),
         ]),
       ),
-      sectionTitle("Mes documents", icon: Icons.folder_open_rounded),
-      const _Documents(),
     ]);
-  }
-}
-
-class _Documents extends StatefulWidget {
-  const _Documents();
-  @override
-  State<_Documents> createState() => _DocumentsState();
-}
-
-class _DocumentsState extends State<_Documents> {
-  List<dynamic>? docs;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    await guard(context, () async {
-      docs = (await Api.get('/me/documents')) as List;
-    });
-    if (mounted) setState(() => docs ??= []);
-  }
-
-  Future<void> _add({bool file = false}) => guard(context, () async {
-        final f = await pickDocument(file: file);
-        if (f == null) return;
-        await Api.post('/me/documents', f);
-        await _load();
-        if (mounted) toast(context, tr("Document ajouté"));
-      });
-
-  Future<void> _remove(dynamic d) => guard(context, () async {
-        await Api.post('/me/documents/${d['id']}/delete');
-        await _load();
-      });
-
-  @override
-  Widget build(BuildContext context) {
-    final list = docs;
-    return AppCard(
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(tr("Ajoutez vos résultats d'analyses ou examens (photo ou PDF, 1 Mo max). Seuls vos médecins en rendez-vous peuvent les consulter.")),
-        const SizedBox(height: 12),
-        if (list == null)
-          const LinearProgressIndicator()
-        else if (list.isEmpty)
-          Text(tr("Aucun document."), style: const TextStyle(color: cMuted))
-        else
-          for (final d in list)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(d['mime'] == 'application/pdf' ? Icons.picture_as_pdf_outlined : Icons.image_outlined, color: cMid),
-              title: Text('${d['name']}', maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(fmtDt(d['created_at'])),
-              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(tooltip: tr("Ouvrir"), icon: const Icon(Icons.open_in_new_rounded), onPressed: () => openDocument('${d['id']}')),
-                IconButton(tooltip: tr("Supprimer"), icon: const Icon(Icons.delete_outline), onPressed: () => _remove(d)),
-              ]),
-            ),
-        const SizedBox(height: 8),
-        Wrap(spacing: 8, runSpacing: 8, children: [
-          PrimaryButton("Ajouter une photo", icon: Icons.photo_camera_outlined, expand: false, onPressed: () => _add()),
-          PrimaryButton("Ajouter un PDF ou un fichier", icon: Icons.upload_file_rounded, expand: false, onPressed: () => _add(file: true)),
-        ]),
-      ]),
-    );
   }
 }

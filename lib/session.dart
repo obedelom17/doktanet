@@ -10,8 +10,6 @@ class Session extends ChangeNotifier {
     if (Api.token != null) {
       try {
         await refresh();
-      } on OfflineException {
-        // Hors-ligne au démarrage : on garde la session (jeton conservé), l'écran de connexion s'affiche si rien n'est en cache.
       } catch (_) {
         await Api.setToken(null);
         user = null;

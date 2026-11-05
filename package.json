@@ -8,20 +8,15 @@
     "@neondatabase/serverless": "^1.0.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.15",
     "wrangler": "^3.90.0"
   },
   "scripts": {
     "build": "flutter build web --release",
-    "check:api": "node --check functions/api/[[path]].js && node --check functions/_shared/util.js",
+    "check:api": "node -e \"require('fs').copyFileSync('functions/api/[[path]].js','/tmp/_api.mjs')\" && node --check /tmp/_api.mjs",
     "db:setup": "node db-setup.mjs",
     "db:seed": "node db-setup.mjs seed",
-    "db:migrate": "node db-setup.mjs migration_v2",
     "db:schema": "node db-setup.mjs schema",
     "env:sync": "node sync-env.mjs",
-    "dev": "node sync-env.mjs && flutter build web && wrangler pages dev build/web",
-    "test": "node --import ./tests/register.mjs --test tests/util.test.mjs tests/api.test.mjs tests/sw.test.mjs",
-    "build:web": "flutter build web --release --pwa-strategy=none --no-web-resources-cdn"
-  },
-  "type": "module"
+    "dev": "node sync-env.mjs && flutter build web && wrangler pages dev build/web"
+  }
 }

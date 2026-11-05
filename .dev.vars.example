@@ -8,16 +8,3 @@ COMMISSION_PCT=10
 GROQ_API_KEY=gsk_votre_cle_groq
 GROQ_MODEL=openai/gpt-oss-20b
 REQUIRE_2FA=0
-
-# --- v2 ---
-# Clé de chiffrement des messages et documents (AES-GCM). Générer : openssl rand -base64 32. NE JAMAIS la perdre ni la changer sans migration.
-DATA_KEY=changez-moi-chaine-aleatoire-longue
-# Emails (réinitialisation de mot de passe, notifications) via Resend : https://resend.com
-# RESEND_API_KEY=re_xxx
-# MAIL_FROM=DoktaNet <no-reply@votre-domaine.tg>
-# Paiement mobile money réel (PayGate Global). PAY_SANDBOX=0 pour l'activer.
-# PAYGATE_TOKEN=votre_jeton_paygate
-# Rappels de rendez-vous : même valeur dans le secret GitHub CRON_SECRET
-CRON_SECRET=changez-moi
-# 1 = la consultation exige un paiement confirmé
-REQUIRE_PAYMENT=0
