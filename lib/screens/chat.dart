@@ -93,10 +93,36 @@ class _ChatPageState extends State<ChatPage> {
     await guard(context, () async {
       final body = <String, dynamic>{'message': t, 'lang': l10n.lang};
       if (conv != null) body['conversation_id'] = conv;
-      final r = await Api.post('/chat', body);
-      conv = '${r['conversation_id']}';
-      ChatPage.lastConv = conv;
-      msgs.add({'role': 'assistant', 'content': '${r['reply']}'});
+      var received = false;
+      msgs.add({'role': 'assistant', 'content': ''});
+      final idx = msgs.length - 1;
+      try {
+        await for (final ev in Api.postStream('/chat', {...body, 'stream': true})) {
+          if (ev['conversation_id'] != null) {
+            conv = '${ev['conversation_id']}';
+            ChatPage.lastConv = conv;
+          }
+          final tk = ev['t'];
+          if (tk != null && mounted) {
+            received = true;
+            setState(() => msgs[idx]['content'] = '${msgs[idx]['content']}$tk');
+            _down();
+          }
+          if (ev['error'] != null) throw ApiException('${ev['error']}');
+        }
+      } on OfflineException {
+        // Flux impossible (navigateur ou réseau) avant toute réception : repli sur la réponse complète, sans streaming.
+        if (received) rethrow;
+        msgs.removeAt(idx);
+        final r = await Api.post('/chat', body);
+        conv = '${r['conversation_id']}';
+        ChatPage.lastConv = conv;
+        msgs.add({'role': 'assistant', 'content': '${r['reply']}'});
+      } finally {
+        if (msgs.isNotEmpty && msgs.last['role'] == 'assistant' && (msgs.last['content'] ?? '').isEmpty) {
+          msgs.removeLast();
+        }
+      }
     });
     if (mounted) {
       setState(() => busy = false);
@@ -172,6 +198,26 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  Future<void> _flag(String text) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(tr("Signaler cette réponse")),
+        content: Text(tr("Cette réponse de l'assistant sera transmise à l'équipe pour vérification.")),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: Text(tr("Signaler"))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await guard(context, () async {
+      final ex = text.length > 400 ? text.substring(0, 400) : text;
+      await Api.post('/reports', {'reason': "Réponse de l'assistant IA signalée : $ex"});
+      if (mounted) toast(context, tr("Signalement envoyé"));
+    });
+  }
+
   Widget _bubble(Map<String, String> m) {
     final u = m['role'] == 'user';
     final bubble = Container(
@@ -192,7 +238,25 @@ class _ChatPageState extends State<ChatPage> {
       child: u
           ? SelectableText(m['content'] ?? '',
               style: const TextStyle(color: Colors.white, fontSize: 15.5, height: 1.4))
-          : _markdown(m['content'] ?? ''),
+          : Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              _markdown(m['content'] ?? ''),
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerRight,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => _flag(m['content'] ?? ''),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.flag_outlined, size: 15, color: cMuted),
+                      const SizedBox(width: 4),
+                      Text(tr("Signaler"), style: const TextStyle(fontSize: 12, color: cMuted)),
+                    ]),
+                  ),
+                ),
+              ),
+            ]),
     );
     return Reveal(
       dy: 14,
@@ -288,7 +352,7 @@ class _ChatPageState extends State<ChatPage> {
             ? _welcome()
             : ListView(controller: scroll, padding: const EdgeInsets.all(16), children: [
                 for (final m in msgs) _bubble(m),
-                if (busy) _typing(),
+                if (busy && !(msgs.isNotEmpty && msgs.last['role'] == 'assistant' && (msgs.last['content'] ?? '').isNotEmpty)) _typing(),
               ]),
       ),
       Container(

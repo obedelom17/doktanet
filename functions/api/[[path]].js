@@ -1,37 +1,66 @@
 import { neon } from '@neondatabase/serverless';
+import {
+  enc, b64u, unb64u, hex, hkey, signJwt, verifyJwt, hashPassword, checkPassword,
+  b32enc, totp, totpCheck, timingSafeEq, encData, decData, sha256hex, randToken,
+  DOC_RE, isRated, limited, validEmail, validPhone, readChatStream, docMagicOk,
+} from '../_shared/util.js';
 
-const enc = new TextEncoder();
 let avatarReady = false;
+
+const CONSENT_VERSION = '2026-11-v1';
+const V2_SQL = ["alter table users add column if not exists token_version int not null default 0", "alter table users add column if not exists deleted_at timestamptz", "alter table users add column if not exists consent_version text", "do $$ begin if not exists (select 1 from pg_constraint where conname = 'users_status_check_v2') then alter table users drop constraint if exists users_status_check; alter table users add constraint users_status_check_v2 check (status in ('active','pending','rejected','deleted')); end if; end $$", "alter table appointments add column if not exists payment_status text not null default 'unpaid'", "alter table appointments add column if not exists payment_ref text", "alter table appointments add column if not exists amount int", "alter table appointments add column if not exists reminded_at timestamptz", "alter table appointments add column if not exists reschedule_count int not null default 0", "create table if not exists reviews (id uuid primary key default gen_random_uuid(), appointment_id uuid not null unique references appointments(id) on delete cascade, doctor_id uuid not null references users(id), patient_id uuid not null references users(id), rating int not null check (rating between 1 and 5), comment text, created_at timestamptz not null default now())", "create index if not exists reviews_doctor_idx on reviews (doctor_id)", "create table if not exists patient_documents (id uuid primary key default gen_random_uuid(), patient_id uuid not null references users(id) on delete cascade, name text not null, mime text not null, size int not null, data text not null, created_at timestamptz not null default now())", "create index if not exists patient_documents_idx on patient_documents (patient_id)", "create table if not exists notifications (id bigserial primary key, user_id uuid not null references users(id) on delete cascade, title text not null, body text, created_at timestamptz not null default now(), read_at timestamptz)", "create index if not exists notifications_user_idx on notifications (user_id, id desc)", "create table if not exists password_resets (token_hash text primary key, user_id uuid not null references users(id) on delete cascade, expires_at timestamptz not null, used_at timestamptz)", "create table if not exists login_attempts (id bigserial primary key, ident text not null, created_at timestamptz not null default now())", "create index if not exists login_attempts_idx on login_attempts (ident, created_at)"];
+let v2Ready = false;
+const fmtD = (iso) => new Date(iso).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+
+async function sendMail(env, to, subject, html) {
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM || !to) return false;
+  try {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${env.RESEND_API_KEY}` },
+      body: JSON.stringify({ from: env.MAIL_FROM, to: [to], subject, html }),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+// ---------- Paiement mobile money (PayGate Global : T-Money / Flooz) ----------
+const PAYGATE = 'https://paygateglobal.com/api';
+const phone8 = (p) => String(p || '').replace(/\s/g, '').replace(/^\+?228/, '');
+async function startPayment(env, { ref, amount, phone, provider, description }) {
+  if (env.PAY_SANDBOX === '1') return 'paid';
+  if (!env.PAYGATE_TOKEN) throw new HttpError(503, 'Paiement mobile non configuré');
+  let j = null;
+  try {
+    const r = await fetch(`${PAYGATE}/v1/pay`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ auth_token: env.PAYGATE_TOKEN, phone_number: phone8(phone), amount, description, identifier: ref, network: provider === 'Flooz' ? 'FLOOZ' : 'TMONEY' }),
+    });
+    j = await r.json();
+  } catch { j = null; }
+  if (!j || Number(j.status) !== 0) throw new HttpError(502, "Paiement refusé par l'opérateur");
+  return 'pending';
+}
+// Confirmation directe auprès de l'opérateur : ne jamais croire un webhook non authentifié.
+async function verifyPayment(env, ref) {
+  if (!env.PAYGATE_TOKEN) return 'pending';
+  try {
+    const r = await fetch(`${PAYGATE}/v2/status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ auth_token: env.PAYGATE_TOKEN, identifier: ref }),
+    });
+    const j = await r.json();
+    const st = Number(j.status);
+    if (st === 0) return 'paid';
+    if (st === 4 || st === 6) return 'failed';
+  } catch { /* pending */ }
+  return 'pending';
+}
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { 'content-type': 'application/json' } });
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const unb64u = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); };
-const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-const hkey = (secret) => crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
-
-async function signJwt(payload, secret) {
-  const h = b64u(enc.encode(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
-  const p = b64u(enc.encode(JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) + 7 * 86400 })));
-  const sig = await crypto.subtle.sign('HMAC', await hkey(secret), enc.encode(`${h}.${p}`));
-  return `${h}.${p}.${b64u(sig)}`;
-}
-async function verifyJwt(token, secret) {
-  try {
-    const [h, p, s] = token.split('.');
-    if (!(await crypto.subtle.verify('HMAC', await hkey(secret), unb64u(s), enc.encode(`${h}.${p}`)))) return null;
-    const payload = JSON.parse(new TextDecoder().decode(unb64u(p)));
-    return payload.exp > Date.now() / 1000 ? payload : null;
-  } catch { return null; }
-}
-async function hashPassword(pw, saltB64) {
-  const salt = saltB64 ? unb64u(saltB64) : crypto.getRandomValues(new Uint8Array(16));
-  const key = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, key, 256);
-  return `${b64u(salt)}.${b64u(bits)}`;
-}
-const checkPassword = async (pw, stored) => (await hashPassword(pw, stored.split('.')[0])) === stored;
 
 const rxCanon = (r) => JSON.stringify([r.code, r.doctor_id, r.patient_id, new Date(r.created_at).toISOString(),
   (r.items || []).map((i) => [i.name || '', i.dosage || '', i.duration || '']), r.notes || '']);
@@ -113,38 +142,6 @@ RÔLE : assistant du pharmacien. Résume les commandes en cours, signale les sto
 RÔLE : assistant de l'administrateur. Réponds aux questions sur les statistiques et les comptes en attente (outils). Pour un litige, aide à rédiger une réponse neutre et factuelle.`;
 }
 
-// ---------- 2FA TOTP (RFC 6238) ----------
-const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-const b32enc = (bytes) => {
-  let bits = '', out = '';
-  for (const b of bytes) bits += b.toString(2).padStart(8, '0');
-  for (let i = 0; i < bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5).padEnd(5, '0'), 2)];
-  return out;
-};
-const b32dec = (str) => {
-  let bits = '';
-  for (const c of str.replace(/=+$/, '').toUpperCase()) bits += B32.indexOf(c).toString(2).padStart(5, '0');
-  const out = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2));
-  return new Uint8Array(out);
-};
-async function totp(secret, t = Date.now()) {
-  const counter = Math.floor(t / 30000);
-  const buf = new ArrayBuffer(8);
-  const dv = new DataView(buf);
-  dv.setUint32(0, Math.floor(counter / 2 ** 32));
-  dv.setUint32(4, counter >>> 0);
-  const key = await crypto.subtle.importKey('raw', b32dec(secret), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
-  const h = new Uint8Array(await crypto.subtle.sign('HMAC', key, buf));
-  const o = h[19] & 15;
-  const code = (((h[o] & 0x7f) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3]) % 1000000;
-  return String(code).padStart(6, '0');
-}
-async function totpCheck(secret, code) {
-  const c = String(code || '').trim();
-  for (const d of [-1, 0, 1]) if ((await totp(secret, Date.now() + d * 30000)) === c) return true;
-  return false;
-}
 const TEMP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 
 export async function onRequest({ request, env }) {
@@ -153,6 +150,14 @@ export async function onRequest({ request, env }) {
   const m = request.method;
   const sql = neon(env.DATABASE_URL);
   const q = (t, p = []) => sql.query(t, p);
+  const ensureV2 = async () => {
+    if (v2Ready) return;
+    const [c] = await q(`select
+      (select count(*) from information_schema.columns where (table_name='users' and column_name='token_version') or (table_name='appointments' and column_name='payment_status'))::int a,
+      (to_regclass('public.notifications') is not null and to_regclass('public.reviews') is not null and to_regclass('public.patient_documents') is not null and to_regclass('public.password_resets') is not null and to_regclass('public.login_attempts') is not null) ok`);
+    if (!(c.a >= 2 && c.ok)) for (const st of V2_SQL) await q(st);
+    v2Ready = true;
+  };
   const ensureMsgTables = async () => {
     await q(`create table if not exists appointment_messages (
       id bigserial primary key,
@@ -194,16 +199,49 @@ export async function onRequest({ request, env }) {
     return params;
   };
 
+  await ensureV2();
+  const ip = request.headers.get('cf-connecting-ip') || 'noip';
+  const attempts = async (ident, minutes) => (await q(`select count(*)::int c from login_attempts where ident=$1 and created_at > now() - ($2 || ' minutes')::interval`, [ident, String(minutes)]))[0].c;
+  const noteAttempt = (ident) => q('insert into login_attempts(ident) values($1)', [ident]);
   const bearer = (request.headers.get('authorization') || '').replace(/^Bearer /, '') || url.searchParams.get('t') || '';
   const claims = bearer ? await verifyJwt(bearer, env.JWT_SECRET) : null;
-  const user = claims ? (await q('select id,email,phone,role,full_name,status,totp_enabled from users where id=$1', [claims.sub]))[0] || null : null;
+  let user = claims ? (await q('select id,email,phone,role,full_name,status,totp_enabled,token_version from users where id=$1', [claims.sub]))[0] || null : null;
+  if (user && (user.status === 'deleted' || Number(claims.tv ?? 0) !== Number(user.token_version))) user = null;
   const need = (...roles) => {
     if (!user) throw new HttpError(401, 'Non connecté');
     if (roles.length && !roles.includes(user.role)) throw new HttpError(403, 'Accès refusé');
     if ((user.role === 'doctor' || user.role === 'pharmacy') && user.status !== 'active') throw new HttpError(403, 'Compte en attente de validation');
   };
   const authed = () => { if (!user) throw new HttpError(401, 'Non connecté'); };
-  const audit = (action, type, id) => q('insert into audit_logs(user_id,action,target_type,target_id) values($1,$2,$3,$4)', [user.id, action, type, String(id)]);
+  const auditSys = (uid, action, type, id) => q('insert into audit_logs(user_id,action,target_type,target_id) values($1,$2,$3,$4)', [uid || null, action, type || null, id == null ? null : String(id)]);
+  const audit = (action, type, id) => auditSys(user.id, action, type, id);
+  const notify = async (uid, title, text = '') => {
+    try {
+      await q('insert into notifications(user_id,title,body) values($1,$2,$3)', [uid, title, text]);
+      if (env.RESEND_API_KEY) {
+        const [u] = await q(`select email from users where id=$1 and status<>'deleted'`, [uid]);
+        if (u) await sendMail(env, u.email, `DoktaNet - ${title}`, `<p><b>${esc(title)}</b></p><p>${esc(text)}</p><p><a href="${esc(url.origin)}">Ouvrir DoktaNet</a></p>`);
+      }
+    } catch (_) { /* une notification ne doit jamais bloquer l'action */ }
+  };
+  const settle = async (ref, outcome, amount) => {
+    const mapped = outcome === 'paid' ? 'paid' : outcome === 'failed' ? 'unpaid' : 'pending';
+    const [o] = await q('select id, total, patient_id from orders where payment_ref=$1', [ref]);
+    if (o) {
+      if (outcome === 'paid' && amount != null && Number(amount) !== Number(o.total)) { await auditSys(null, 'payment_amount_mismatch', 'order', o.id); throw new HttpError(400, 'Montant incohérent'); }
+      const r = await q(`update orders set payment_status=$2 where id=$1 and payment_status in ('unpaid','pending') returning id`, [o.id, mapped]);
+      if (r.length && outcome === 'paid') await notify(o.patient_id, 'Paiement confirmé', `Commande de ${o.total} FCFA.`);
+      return;
+    }
+    const [a] = await q('select id, amount, patient_id, doctor_id from appointments where payment_ref=$1', [ref]);
+    if (!a) throw new HttpError(404, 'Paiement introuvable');
+    if (outcome === 'paid' && amount != null && Number(amount) !== Number(a.amount)) { await auditSys(null, 'payment_amount_mismatch', 'appointment', a.id); throw new HttpError(400, 'Montant incohérent'); }
+    const r = await q(`update appointments set payment_status=$2 where id=$1 and payment_status in ('unpaid','pending') returning id`, [a.id, mapped]);
+    if (r.length && outcome === 'paid') {
+      await notify(a.patient_id, 'Paiement confirmé', `Consultation de ${a.amount} FCFA.`);
+      await notify(a.doctor_id, 'Consultation payée', `Un patient a réglé ${a.amount} FCFA.`);
+    }
+  };
 
   async function slotsFor(doctorId, date) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) throw new HttpError(400, 'Date invalide');
@@ -312,7 +350,8 @@ export async function onRequest({ request, env }) {
           (select count(*) from users where role='patient')::int patients,
           (select count(*) from users where role='doctor' and status='active')::int doctors,
           (select count(*) from users where role='pharmacy' and status='active')::int pharmacies,
-          (select count(*) from orders)::int orders`);
+          (select count(*) from orders)::int orders,
+        (select count(*) from appointments where payment_status='refund_due')::int refunds_due`);
         return st;
       }
       case 'get_pending_accounts':
@@ -352,25 +391,36 @@ export async function onRequest({ request, env }) {
     }
     if (route('POST', '/auth/register')) {
       const { role, email, password, full_name, phone, consent } = body;
+      if (limited(await attempts(`r:${ip}`, 60), 10)) throw new HttpError(429, 'Trop de créations de compte : réessayez plus tard');
+      await noteAttempt(`r:${ip}`);
+      if (!validEmail(email)) throw new HttpError(400, 'Email invalide');
+      if (phone && !validPhone(phone)) throw new HttpError(400, 'Numéro invalide');
       if (!['patient', 'doctor', 'pharmacy'].includes(role)) throw new HttpError(400, 'Rôle invalide');
-      if (!email || !full_name || !password || password.length < 8) throw new HttpError(400, 'Champs requis (mot de passe : 8 caractères min.)');
+      if (!email || !full_name || !password || password.length < 8 || password.length > 200) throw new HttpError(400, 'Champs requis (mot de passe : 8 caractères min.)');
       if (!consent) throw new HttpError(400, 'Consentement requis');
       if (role === 'doctor' && !body.order_number) throw new HttpError(400, "Numéro d'ordre requis");
       if (role === 'pharmacy' && (!body.pharmacy_name || !body.license_number)) throw new HttpError(400, 'Nom et licence requis');
       if ((await q('select 1 from users where lower(email)=lower($1)', [email])).length) throw new HttpError(409, 'Email déjà utilisé');
-      const [u] = await q('insert into users(email,phone,password_hash,role,full_name,status,consent_at) values(lower($1),$2,$3,$4,$5,$6,now()) returning id',
-        [email, phone || null, await hashPassword(password), role, full_name, role === 'patient' ? 'active' : 'pending']);
+      const [u] = await q('insert into users(email,phone,password_hash,role,full_name,status,consent_at,consent_version) values(lower($1),$2,$3,$4,$5,$6,now(),$7) returning id',
+        [email, phone || null, await hashPassword(password), role, full_name, role === 'patient' ? 'active' : 'pending', CONSENT_VERSION]);
+      await auditSys(u.id, 'register', 'user', u.id);
       if (role === 'patient') await q('insert into patient_profiles(user_id) values($1)', [u.id]);
       if (role === 'doctor') await q('insert into doctor_profiles(user_id,order_number,specialty,city,fee) values($1,$2,$3,$4,$5)',
         [u.id, body.order_number, body.specialty || 'Médecine générale', body.city || null, Number(body.fee) || 5000]);
       if (role === 'pharmacy') await q('insert into pharmacy_profiles(user_id,name,license_number,city,address,phone) values($1,$2,$3,$4,$5,$6)',
         [u.id, body.pharmacy_name, body.license_number, body.city || null, body.address || null, phone || null]);
       if (body.avatar && role !== 'patient') { await ensureAvatar(); try { await saveAvatar(u.id, body.avatar); } catch (_) {} }
-      return json({ token: await signJwt({ sub: u.id }, env.JWT_SECRET) });
+      return json({ token: await signJwt({ sub: u.id, tv: 0 }, env.JWT_SECRET) });
     }
     if (route('POST', '/auth/login')) {
-      const [u] = await q('select id,password_hash,totp_secret,totp_enabled from users where lower(email)=lower($1)', [body.email || '']);
-      if (!u || !(await checkPassword(body.password || '', u.password_hash))) throw new HttpError(401, 'Identifiants incorrects');
+      const lemail = String(body.email || '').trim().toLowerCase();
+      if (limited(await attempts(`l:${lemail}`, 15), 5) || limited(await attempts(`i:${ip}`, 15), 20)) throw new HttpError(429, 'Trop de tentatives : réessayez dans 15 minutes');
+      const [u] = await q(`select id,password_hash,totp_secret,totp_enabled,token_version from users where lower(email)=$1 and status<>'deleted'`, [lemail]);
+      if (!u || !(await checkPassword(body.password || '', u.password_hash))) {
+        await noteAttempt(`l:${lemail}`);
+        await noteAttempt(`i:${ip}`);
+        throw new HttpError(401, 'Identifiants incorrects');
+      }
       if (u.totp_enabled) {
         if (!body.code) return json({ need_2fa: true });
         const [f] = await q(`select count(*)::int c from audit_logs where user_id=$1 and action='2fa_fail' and created_at > now() - interval '10 minutes'`, [u.id]);
@@ -380,7 +430,40 @@ export async function onRequest({ request, env }) {
           throw new HttpError(401, 'Code 2FA invalide');
         }
       }
-      return json({ token: await signJwt({ sub: u.id }, env.JWT_SECRET) });
+      await q('delete from login_attempts where ident=$1 or created_at < now() - interval \'1 day\'', [`l:${lemail}`]);
+      await auditSys(u.id, 'login', 'user', u.id);
+      return json({ token: await signJwt({ sub: u.id, tv: u.token_version }, env.JWT_SECRET) });
+    }
+    if (route('POST', '/auth/forgot')) {
+      if (limited(await attempts(`f:${ip}`, 60), 5)) throw new HttpError(429, 'Trop de demandes : réessayez plus tard');
+      await noteAttempt(`f:${ip}`);
+      if (!env.RESEND_API_KEY || !env.MAIL_FROM) throw new HttpError(503, "Envoi d'email non configuré : contactez l'administrateur");
+      const [fu] = await q(`select id,email from users where lower(email)=$1 and status<>'deleted'`, [String(body.email || '').trim().toLowerCase()]);
+      if (fu) {
+        const tok = randToken(32);
+        await q(`insert into password_resets(token_hash,user_id,expires_at) values($1,$2,now() + interval '1 hour')`, [await sha256hex(tok), fu.id]);
+        await sendMail(env, fu.email, 'DoktaNet - Réinitialisation du mot de passe',
+          `<p>Pour choisir un nouveau mot de passe (valable 1 heure) :</p><p><a href="${esc(url.origin)}/?reset=${esc(tok)}">Réinitialiser mon mot de passe</a></p><p>Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>`);
+        await auditSys(fu.id, 'password_reset_requested', 'user', fu.id);
+      }
+      return json({ ok: true });
+    }
+    if (route('POST', '/auth/reset')) {
+      const pw = String(body.password || '');
+      if (pw.length < 8 || pw.length > 200) throw new HttpError(400, 'Mot de passe trop court (8 caractères min.)');
+      const h = await sha256hex(String(body.token || ''));
+      const [rs] = await q('select user_id from password_resets where token_hash=$1 and used_at is null and expires_at>now()', [h]);
+      if (!rs) throw new HttpError(400, 'Lien invalide ou expiré');
+      await q('update password_resets set used_at=now() where token_hash=$1', [h]);
+      await q('update users set password_hash=$2, token_version=token_version+1 where id=$1', [rs.user_id, await hashPassword(pw)]);
+      await auditSys(rs.user_id, 'password_reset', 'user', rs.user_id);
+      return json({ ok: true });
+    }
+    if (route('POST', '/auth/logout-all')) {
+      authed();
+      await q('update users set token_version=token_version+1 where id=$1', [user.id]);
+      await audit('logout_all', 'user', user.id);
+      return json({ ok: true });
     }
     if (route('GET', '/me')) {
       if (!user) throw new HttpError(401, 'Non connecté');
@@ -388,7 +471,8 @@ export async function onRequest({ request, env }) {
       const profile = tbl ? (await q(`select * from ${tbl} where user_id=$1`, [user.id]))[0] || {} : {};
       await ensureAvatar();
       const [av] = await q('select avatar_v from users where id=$1', [user.id]);
-      return json({ ...user, avatar_v: Number(av?.avatar_v || 0), profile, require_2fa: env.REQUIRE_2FA === '1' && ['doctor', 'admin'].includes(user.role) && !user.totp_enabled });
+      const { token_version: _tv, ...pub } = user;
+      return json({ ...pub, avatar_v: Number(av?.avatar_v || 0), profile, require_2fa: env.REQUIRE_2FA === '1' && ['doctor', 'admin'].includes(user.role) && !user.totp_enabled });
     }
     if ((p = route('GET', '/verify/:code'))) {
       const [r] = await q('select r.*, du.full_name doctor_name from prescriptions r join users du on du.id=r.doctor_id where r.code=$1', [p.code]);
@@ -396,8 +480,15 @@ export async function onRequest({ request, env }) {
       return json({ valid: (await rxSign(env, r)) === r.signature, doctor: r.doctor_name, date: r.created_at });
     }
     if (route('POST', '/payments/webhook')) {
-      if (!env.PAY_WEBHOOK_SECRET || body.secret !== env.PAY_WEBHOOK_SECRET) throw new HttpError(403, 'Refusé');
-      await q('update orders set payment_status=$1 where payment_ref=$2', [body.status === 'success' ? 'paid' : 'unpaid', body.ref]);
+      const given = request.headers.get('x-webhook-secret') || body.secret;
+      const ref = String(body.ref || body.identifier || '');
+      if (!ref) throw new HttpError(400, 'Référence manquante');
+      let outcome;
+      if (env.PAY_WEBHOOK_SECRET && timingSafeEq(given, env.PAY_WEBHOOK_SECRET)) outcome = body.status === 'success' ? 'paid' : 'failed';
+      else if (env.PAYGATE_TOKEN) outcome = await verifyPayment(env, ref);
+      else throw new HttpError(403, 'Refusé');
+      await settle(ref, outcome, body.amount);
+      await auditSys(null, `payment_${outcome}`, 'payment', ref);
       return json({ ok: true });
     }
 
@@ -425,7 +516,9 @@ export async function onRequest({ request, env }) {
     if (route('GET', '/doctors')) {
       need();
       await ensureAvatar();
-      return json(await q(`select u.id,u.full_name,u.avatar_v,d.specialty,d.city,d.fee,d.experience_years,d.languages,d.bio
+      return json(await q(`select u.id,u.full_name,u.avatar_v,d.specialty,d.city,d.fee,d.experience_years,d.languages,d.bio,
+          (select round(avg(rv.rating)::numeric,1)::float from reviews rv where rv.doctor_id=u.id) rating,
+          (select count(*)::int from reviews rv where rv.doctor_id=u.id) review_count
         from users u join doctor_profiles d on d.user_id=u.id
         where u.role='doctor' and u.status='active'
           and ($1::text='' or u.full_name ilike '%'||$1::text||'%' or d.specialty ilike '%'||$1::text||'%')
@@ -453,9 +546,13 @@ export async function onRequest({ request, env }) {
       const d = new Date(body.starts_at);
       if (isNaN(d)) throw new HttpError(400, 'Date invalide');
       const iso = d.toISOString();
+      const [df] = await q(`select d.fee from doctor_profiles d join users u on u.id=d.user_id where u.id=$1 and u.status='active' and u.role='doctor'`, [body.doctor_id]);
+      if (!df) throw new HttpError(404, 'Médecin introuvable');
       if (!(await slotsFor(body.doctor_id, iso.slice(0, 10))).includes(iso)) throw new HttpError(409, 'Créneau indisponible');
       try {
-        const [a] = await q('insert into appointments(patient_id,doctor_id,starts_at) values($1,$2,$3) returning id', [user.id, body.doctor_id, iso]);
+        const [a] = await q('insert into appointments(patient_id,doctor_id,starts_at,amount) values($1,$2,$3,$4) returning id', [user.id, body.doctor_id, iso, df.fee]);
+        await audit('appointment_book', 'appointment', a.id);
+        await notify(body.doctor_id, 'Nouveau rendez-vous', `${user.full_name} - ${fmtD(iso)}`);
         return json({ id: a.id });
       } catch (e) { if (e.code === '23505') throw new HttpError(409, 'Créneau déjà pris'); throw e; }
     }
@@ -463,7 +560,7 @@ export async function onRequest({ request, env }) {
       need('patient', 'doctor');
       await ensureMsgTables();
       await ensureAvatar();
-      if (user.role === 'patient') return json(await q('select a.*, ' + UNREAD + ', u.avatar_v doctor_avatar_v, u.full_name doctor_name, d.specialty, d.fee from appointments a join users u on u.id=a.doctor_id join doctor_profiles d on d.user_id=a.doctor_id where a.patient_id=$1 order by a.starts_at desc', [user.id]));
+      if (user.role === 'patient') return json(await q('select a.*, ' + UNREAD + ', exists(select 1 from reviews rv where rv.appointment_id=a.id) reviewed, u.avatar_v doctor_avatar_v, u.full_name doctor_name, d.specialty, d.fee from appointments a join users u on u.id=a.doctor_id join doctor_profiles d on d.user_id=a.doctor_id where a.patient_id=$1 order by a.starts_at desc', [user.id]));
       return json(await q('select a.*, ' + UNREAD + ', u.full_name patient_name from appointments a join users u on u.id=a.patient_id where a.doctor_id=$1 order by a.starts_at', [user.id]));
     }
     if ((p = route('POST', '/appointments/:id/status'))) {
@@ -474,14 +571,77 @@ export async function onRequest({ request, env }) {
         const ok = user.role === 'patient' ? (body.status === 'cancelled' && a.status === 'scheduled') : ['in_progress', 'done', 'cancelled'].includes(body.status);
         if (!ok) throw new HttpError(400, 'Statut non autorisé');
         await q('update appointments set status=$2 where id=$1', [a.id, body.status]);
+        const other = a.patient_id === user.id ? a.doctor_id : a.patient_id;
+        if (body.status === 'cancelled') {
+          if (a.payment_status === 'paid') await q(`update appointments set payment_status='refund_due' where id=$1`, [a.id]);
+          await audit('appointment_cancel', 'appointment', a.id);
+          await notify(other, 'Rendez-vous annulé', `${user.full_name} a annulé le rendez-vous du ${fmtD(a.starts_at)}.${a.payment_status === 'paid' ? ' Un remboursement va être traité.' : ''}`);
+        } else if (body.status === 'done') {
+          await notify(a.patient_id, 'Consultation terminée', 'Vous pouvez noter votre médecin depuis vos rendez-vous.');
+        }
       }
       if (typeof body.notes === 'string' && user.role === 'doctor') await q('update appointments set notes=$2 where id=$1', [a.id, body.notes]);
       return json({ ok: true });
+    }
+    if ((p = route('POST', '/appointments/:id/reschedule'))) {
+      need('patient', 'doctor');
+      const [a] = await q('select * from appointments where id=$1', [p.id]);
+      if (!a || (a.patient_id !== user.id && a.doctor_id !== user.id)) throw new HttpError(404, 'Introuvable');
+      if (a.status !== 'scheduled') throw new HttpError(400, 'Statut non autorisé');
+      const d = new Date(body.starts_at);
+      if (isNaN(d)) throw new HttpError(400, 'Date invalide');
+      const iso = d.toISOString();
+      if (user.role === 'patient') {
+        if (new Date(a.starts_at).getTime() - Date.now() < 2 * 3600 * 1000) throw new HttpError(400, 'Trop tard pour reprogrammer (moins de 2 h)');
+        if (a.reschedule_count >= 2) throw new HttpError(400, 'Limite de reprogrammation atteinte');
+      }
+      if (!(await slotsFor(a.doctor_id, iso.slice(0, 10))).includes(iso)) throw new HttpError(409, 'Créneau indisponible');
+      try {
+        await q('update appointments set starts_at=$2, reminded_at=null, reschedule_count=reschedule_count+1 where id=$1', [a.id, iso]);
+      } catch (e) { if (e.code === '23505') throw new HttpError(409, 'Créneau déjà pris'); throw e; }
+      await audit('appointment_reschedule', 'appointment', a.id);
+      await notify(a.patient_id === user.id ? a.doctor_id : a.patient_id, 'Rendez-vous reprogrammé', `${user.full_name} : ${fmtD(a.starts_at)} -> ${fmtD(iso)}`);
+      return json({ ok: true });
+    }
+    if ((p = route('POST', '/appointments/:id/pay'))) {
+      need('patient');
+      const [a] = await q('select * from appointments where id=$1 and patient_id=$2', [p.id, user.id]);
+      if (!a) throw new HttpError(404, 'Introuvable');
+      if (a.status === 'cancelled') throw new HttpError(400, 'Rendez-vous annulé');
+      if (a.payment_status === 'paid') throw new HttpError(400, 'Déjà payé');
+      if (!validPhone(body.phone)) throw new HttpError(400, 'Numéro invalide');
+      const [df] = await q('select fee from doctor_profiles where user_id=$1', [a.doctor_id]);
+      const amount = a.amount ?? df.fee;
+      const ref = crypto.randomUUID();
+      const status = await startPayment(env, { ref, amount, phone: body.phone, provider: body.provider, description: 'Consultation DoktaNet' });
+      await q('update appointments set payment_status=$2, payment_ref=$3, amount=$4 where id=$1', [a.id, status, ref, amount]);
+      await audit('appointment_pay', 'appointment', a.id);
+      if (status === 'paid') await notify(a.doctor_id, 'Consultation payée', `${user.full_name} a réglé ${amount} FCFA.`);
+      return json({ ref, status });
+    }
+    if ((p = route('POST', '/appointments/:id/review'))) {
+      need('patient');
+      const [a] = await q('select * from appointments where id=$1 and patient_id=$2', [p.id, user.id]);
+      if (!a) throw new HttpError(404, 'Introuvable');
+      if (a.status !== 'done') throw new HttpError(400, "Évaluation possible après la consultation");
+      const rating = Number(body.rating);
+      if (!isRated(rating)) throw new HttpError(400, 'Note invalide (1 à 5)');
+      try {
+        await q('insert into reviews(appointment_id,doctor_id,patient_id,rating,comment) values($1,$2,$3,$4,$5)',
+          [a.id, a.doctor_id, user.id, rating, String(body.comment || '').trim().slice(0, 500) || null]);
+      } catch (e) { if (e.code === '23505') throw new HttpError(409, 'Déjà évalué'); throw e; }
+      await notify(a.doctor_id, 'Nouvel avis', `${rating}/5`);
+      return json({ ok: true });
+    }
+    if ((p = route('GET', '/doctors/:id/reviews'))) {
+      need();
+      return json(await q(`select r.rating, r.comment, r.created_at, split_part(u.full_name,' ',1) author from reviews r join users u on u.id=r.patient_id where r.doctor_id=$1 order by r.created_at desc limit 20`, [p.id]));
     }
     if ((p = route('POST', '/appointments/:id/room'))) {
       need('patient', 'doctor');
       const [a] = await q('select * from appointments where id=$1', [p.id]);
       if (!a || (a.patient_id !== user.id && a.doctor_id !== user.id)) throw new HttpError(404, 'Introuvable');
+      if (env.REQUIRE_PAYMENT === '1' && a.payment_status !== 'paid') throw new HttpError(402, 'Paiement requis avant la consultation');
       let room = a.room_url;
       if (!room) {
         // Nom de salle deterministe : medecin et patient arrivent toujours dans la meme salle.
@@ -531,6 +691,8 @@ export async function onRequest({ request, env }) {
       const signature = await rxSign(env, rec);
       await q('insert into prescriptions(id,appointment_id,doctor_id,patient_id,items,notes,signature,code,created_at) values($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9)',
         [id, a.id, user.id, a.patient_id, JSON.stringify(items), rec.notes, signature, code, rec.created_at]);
+      await audit('prescription_create', 'prescription', id);
+      await notify(a.patient_id, 'Nouvelle ordonnance', `Code ${code}. Retrouvez-la dans Accueil.`);
       if (env.RX_BUCKET) await env.RX_BUCKET.put(`ordonnances/${id}.json`, JSON.stringify({ ...rec, signature }), { httpMetadata: { contentType: 'application/json' } });
       return json({ id, code });
     }
@@ -538,6 +700,16 @@ export async function onRequest({ request, env }) {
       need('patient', 'doctor');
       if (user.role === 'patient') return json(await q('select r.id,r.code,r.items,r.notes,r.created_at,u.full_name doctor_name from prescriptions r join users u on u.id=r.doctor_id where r.patient_id=$1 order by r.created_at desc', [user.id]));
       return json(await q('select r.id,r.code,r.items,r.notes,r.created_at,u.full_name patient_name from prescriptions r join users u on u.id=r.patient_id where r.doctor_id=$1 order by r.created_at desc', [user.id]));
+    }
+    if ((p = route('GET', '/prescriptions/:id/data'))) {
+      need('patient', 'doctor', 'pharmacy');
+      const [r] = await q('select r.id, r.code, r.items, r.notes, r.signature, r.created_at, r.patient_id, r.doctor_id, du.full_name doctor_name, dp.order_number, dp.specialty, pu.full_name patient_name from prescriptions r join users du on du.id=r.doctor_id join doctor_profiles dp on dp.user_id=r.doctor_id join users pu on pu.id=r.patient_id where r.id=$1', [p.id]);
+      if (!r) throw new HttpError(404, 'Introuvable');
+      if (user.role === 'patient' && r.patient_id !== user.id) throw new HttpError(404, 'Introuvable');
+      if (user.role === 'doctor' && r.doctor_id !== user.id) throw new HttpError(404, 'Introuvable');
+      if (user.role === 'pharmacy' && !(await q('select 1 from orders where prescription_id=$1 and pharmacy_id=$2', [r.id, user.id])).length) throw new HttpError(404, 'Introuvable');
+      const { patient_id: _p, doctor_id: _d, ...pub } = r;
+      return json({ ...pub, verify_url: `${url.origin}/api/verify/${r.code}` });
     }
     if ((p = route('GET', '/prescriptions/:id/print'))) {
       need('patient', 'doctor', 'pharmacy');
@@ -580,8 +752,10 @@ export async function onRequest({ request, env }) {
     if ((p = route('POST', '/orders/:id/status'))) {
       need('pharmacy');
       if (!['preparing', 'ready', 'delivered', 'cancelled'].includes(body.status)) throw new HttpError(400, 'Statut invalide');
-      const r = await q('update orders set status=$3 where id=$1 and pharmacy_id=$2 returning id', [p.id, user.id, body.status]);
+      const r = await q('update orders set status=$3 where id=$1 and pharmacy_id=$2 returning id, patient_id', [p.id, user.id, body.status]);
       if (!r.length) throw new HttpError(404, 'Introuvable');
+      await audit('order_status', 'order', p.id);
+      if (body.status === 'ready') await notify(r[0].patient_id, 'Commande prête', 'Votre commande est prête à être retirée.');
       return json({ ok: true });
     }
     if ((p = route('POST', '/orders/:id/advice'))) {
@@ -597,9 +771,9 @@ export async function onRequest({ request, env }) {
       if (o.payment_status === 'paid') throw new HttpError(400, 'Déjà payé');
       if (!/^\+?\d{8,15}$/.test(String(body.phone || '').replace(/\s/g, ''))) throw new HttpError(400, 'Numéro invalide');
       const ref = crypto.randomUUID();
-      // TODO production : appeler PayGate Global / KKiaPay ici (T-Money, Flooz) avec ref, montant o.total, body.phone, body.provider.
-      const status = env.PAY_SANDBOX === '1' ? 'paid' : 'pending';
+      const status = await startPayment(env, { ref, amount: o.total, phone: body.phone, provider: body.provider, description: 'Commande pharmacie DoktaNet' });
       await q('update orders set payment_status=$2, payment_ref=$3 where id=$1', [o.id, status, ref]);
+      await audit('order_pay', 'order', o.id);
       return json({ ref, status });
     }
     if (route('GET', '/pharmacy/stock')) {
@@ -627,6 +801,7 @@ export async function onRequest({ request, env }) {
       need('admin');
       await q(`update users set status=$2 where id=$1 and role in ('doctor','pharmacy')`, [p.id, body.approve ? 'active' : 'rejected']);
       await audit(body.approve ? 'approve_user' : 'reject_user', 'user', p.id);
+      await notify(p.id, body.approve ? 'Compte validé' : 'Compte refusé', body.approve ? 'Votre compte est actif. Vous pouvez utiliser DoktaNet.' : 'Votre demande n\'a pas été retenue.');
       return json({ ok: true });
     }
     if (route('GET', '/admin/stats')) {
@@ -638,7 +813,8 @@ export async function onRequest({ request, env }) {
         (select count(*) from users where role='patient')::int patients,
         (select count(*) from users where role='doctor' and status='active')::int doctors,
         (select count(*) from users where role='pharmacy' and status='active')::int pharmacies,
-        (select count(*) from orders)::int orders`);
+        (select count(*) from orders)::int orders,
+        (select count(*) from appointments where payment_status='refund_due')::int refunds_due`);
       return json({ ...s, commission_pct: pct, commission: Math.round((s.gross * pct) / 100) });
     }
 
@@ -667,18 +843,24 @@ export async function onRequest({ request, env }) {
       if (!a || (a.patient_id !== user.id && a.doctor_id !== user.id)) throw new HttpError(404, 'Introuvable');
       const rows = await q(`select m.id, m.sender_id, u.full_name sender_name, m.content, m.created_at from appointment_messages m
         join users u on u.id=m.sender_id where m.appointment_id=$1 and m.id>$2 order by m.id limit 200`, [p.id, parseInt(url.searchParams.get('after')) || 0]);
+      for (const r of rows) r.content = await decData(env.DATA_KEY, r.content);
       const [mx] = await q('select coalesce(max(id),0) mx from appointment_messages where appointment_id=$1', [p.id]);
       await q(`insert into appointment_reads(appointment_id,user_id,last_id) values($1,$2,$3)
         on conflict (appointment_id,user_id) do update set last_id=greatest(appointment_reads.last_id, excluded.last_id)`, [p.id, user.id, mx.mx]);
       return json(rows);
     }
     if (route('GET', '/me/unread')) {
-      need('patient', 'doctor');
-      await ensureMsgTables();
-      const [r] = await q(`select count(*)::int n from appointment_messages m join appointments a on a.id=m.appointment_id
-        where (a.patient_id=$1 or a.doctor_id=$1) and m.sender_id<>$1 and a.status<>'cancelled'
-        and m.id > coalesce((select r.last_id from appointment_reads r where r.appointment_id=a.id and r.user_id=$1),0)`, [user.id]);
-      return json({ count: r.n });
+      authed();
+      let count = 0;
+      if (user.role === 'patient' || user.role === 'doctor') {
+        await ensureMsgTables();
+        const [r] = await q(`select count(*)::int n from appointment_messages m join appointments a on a.id=m.appointment_id
+          where (a.patient_id=$1 or a.doctor_id=$1) and m.sender_id<>$1 and a.status<>'cancelled'
+          and m.id > coalesce((select r.last_id from appointment_reads r where r.appointment_id=a.id and r.user_id=$1),0)`, [user.id]);
+        count = r.n;
+      }
+      const [n] = await q('select count(*)::int n from notifications where user_id=$1 and read_at is null', [user.id]);
+      return json({ count, notifications: n.n });
     }
     if ((p = route('POST', '/appointments/:id/messages'))) {
       need('patient', 'doctor');
@@ -688,7 +870,8 @@ export async function onRequest({ request, env }) {
       if (a.status === 'cancelled') throw new HttpError(400, 'Rendez-vous annulé');
       const text = String(body.content || '').trim().slice(0, 1000);
       if (!text) throw new HttpError(400, 'Message vide');
-      await q('insert into appointment_messages(appointment_id,sender_id,content) values($1,$2,$3)', [p.id, user.id, text]);
+      await q('insert into appointment_messages(appointment_id,sender_id,content) values($1,$2,$3)', [p.id, user.id, await encData(env.DATA_KEY, text)]);
+      await notify(a.patient_id === user.id ? a.doctor_id : a.patient_id, 'Nouveau message', `${user.full_name} vous a écrit.`);
       return json({ ok: true });
     }
     if (route('POST', '/me/2fa/setup')) {
@@ -723,9 +906,9 @@ export async function onRequest({ request, env }) {
       if (next.length < 8) throw new HttpError(400, 'Mot de passe trop court (8 caractères min.)');
       const [r] = await q('select password_hash from users where id=$1', [user.id]);
       if (!(await checkPassword(String(body.current || ''), r.password_hash))) throw new HttpError(401, 'Mot de passe actuel incorrect');
-      await q('update users set password_hash=$2 where id=$1', [user.id, await hashPassword(next)]);
+      const [nu] = await q('update users set password_hash=$2, token_version=token_version+1 where id=$1 returning token_version', [user.id, await hashPassword(next)]);
       await audit('password_changed', 'user', user.id);
-      return json({ ok: true });
+      return json({ ok: true, token: await signJwt({ sub: user.id, tv: nu.token_version }, env.JWT_SECRET) });
     }
     if (route('POST', '/reports')) {
       authed();
@@ -754,11 +937,165 @@ export async function onRequest({ request, env }) {
       need('admin');
       if (p.id === user.id) throw new HttpError(400, 'Statut non autorisé');
       const temp = Array.from(crypto.getRandomValues(new Uint8Array(10))).map((b) => TEMP_ALPHABET[b % TEMP_ALPHABET.length]).join('');
-      const r = await q('update users set password_hash=$2 where id=$1 returning id', [p.id, await hashPassword(temp)]);
+      const r = await q('update users set password_hash=$2, token_version=token_version+1 where id=$1 returning id', [p.id, await hashPassword(temp)]);
       if (!r.length) throw new HttpError(404, 'Introuvable');
       if (body.reset_2fa) await q('update users set totp_enabled=false, totp_secret=null where id=$1', [p.id]);
       await audit(body.reset_2fa ? 'admin_reset_password_2fa' : 'admin_reset_password', 'user', p.id);
       return json({ temp_password: temp });
+    }
+
+
+    // ---------- Notifications ----------
+    if (route('GET', '/me/notifications')) {
+      authed();
+      return json(await q('select id, title, body, created_at, read_at from notifications where user_id=$1 order by id desc limit 30', [user.id]));
+    }
+    if (route('POST', '/me/notifications/read')) {
+      authed();
+      await q('update notifications set read_at=now() where user_id=$1 and read_at is null', [user.id]);
+      return json({ ok: true });
+    }
+
+    // ---------- Documents du patient (résultats, examens), chiffrés au repos si DATA_KEY ----------
+    if (route('POST', '/me/documents')) {
+      need('patient');
+      const file = body.file;
+      if (typeof file !== 'string' || !DOC_RE.test(file)) throw new HttpError(400, 'Fichier invalide (JPG, PNG, WebP ou PDF)');
+      if (file.length > 1500000) throw new HttpError(400, 'Fichier trop lourd (1 Mo max)');
+      if (!docMagicOk(file)) throw new HttpError(400, 'Fichier invalide (JPG, PNG, WebP ou PDF)');
+      const [cnt] = await q('select count(*)::int c from patient_documents where patient_id=$1', [user.id]);
+      if (cnt.c >= 30) throw new HttpError(400, 'Limite de 30 documents atteinte');
+      const name = String(body.name || 'document').trim().slice(0, 120) || 'document';
+      const mime = /^data:([^;]+);/.exec(file)[1];
+      const [d] = await q('insert into patient_documents(patient_id,name,mime,size,data) values($1,$2,$3,$4,$5) returning id',
+        [user.id, name, mime, Math.floor((file.length * 3) / 4), await encData(env.DATA_KEY, file)]);
+      await audit('document_upload', 'document', d.id);
+      return json({ id: d.id });
+    }
+    if (route('GET', '/me/documents')) {
+      need('patient');
+      return json(await q('select id, name, mime, size, created_at from patient_documents where patient_id=$1 order by created_at desc', [user.id]));
+    }
+    if ((p = route('POST', '/me/documents/:id/delete'))) {
+      need('patient');
+      await q('delete from patient_documents where id=$1 and patient_id=$2', [p.id, user.id]);
+      await audit('document_delete', 'document', p.id);
+      return json({ ok: true });
+    }
+    if ((p = route('GET', '/doctor/patients/:id/documents'))) {
+      need('doctor');
+      if (!(await q(`select 1 from appointments where doctor_id=$1 and patient_id=$2 and status<>'cancelled' limit 1`, [user.id, p.id])).length) throw new HttpError(403, 'Accès refusé');
+      await audit('list_documents', 'patient', p.id);
+      return json(await q('select id, name, mime, size, created_at from patient_documents where patient_id=$1 order by created_at desc', [p.id]));
+    }
+    if ((p = route('GET', '/documents/:id'))) {
+      need('patient', 'doctor');
+      const [d] = await q('select * from patient_documents where id=$1', [p.id]);
+      if (!d) throw new HttpError(404, 'Introuvable');
+      if (user.role === 'patient' ? d.patient_id !== user.id
+        : !(await q(`select 1 from appointments where doctor_id=$1 and patient_id=$2 and status<>'cancelled' limit 1`, [user.id, d.patient_id])).length) throw new HttpError(403, 'Accès refusé');
+      if (user.role === 'doctor') await audit('read_document', 'document', d.id);
+      const mt = /^data:([^;]+);base64,(.*)$/s.exec(await decData(env.DATA_KEY, d.data));
+      if (!mt) throw new HttpError(500, 'Document illisible');
+      const bin = atob(mt[2]);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Response(bytes, { headers: {
+        'content-type': mt[1],
+        'content-disposition': `inline; filename="${String(d.name).replace(/[^\w.\- ]/g, '_')}"`,
+        'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; sandbox",
+      } });
+    }
+
+    // ---------- Mes données : export et suppression ----------
+    if (route('GET', '/me/export')) {
+      authed();
+      await ensureMsgTables();
+      const uid = user.id;
+      const tbl = { patient: 'patient_profiles', doctor: 'doctor_profiles', pharmacy: 'pharmacy_profiles' }[user.role];
+      const msgs = await q('select appointment_id, content, created_at from appointment_messages where sender_id=$1 order by id', [uid]);
+      for (const m of msgs) m.content = await decData(env.DATA_KEY, m.content);
+      const convs = await q('select id, title, created_at from chat_conversations where user_id=$1 order by created_at', [uid]);
+      for (const c of convs) c.messages = await q('select role, content, created_at from chat_messages where conversation_id=$1 order by id', [c.id]);
+      const data = {
+        exported_at: new Date().toISOString(),
+        account: (await q('select id,email,phone,role,full_name,status,consent_at,consent_version,created_at from users where id=$1', [uid]))[0],
+        profile: tbl ? (await q(`select * from ${tbl} where user_id=$1`, [uid]))[0] || null : null,
+        appointments: await q('select id,patient_id,doctor_id,starts_at,status,notes,payment_status,amount,created_at from appointments where patient_id=$1 or doctor_id=$1 order by starts_at', [uid]),
+        prescriptions: await q('select id,code,items,notes,created_at from prescriptions where patient_id=$1 or doctor_id=$1 order by created_at', [uid]),
+        orders: await q('select id,status,total,payment_status,created_at from orders where patient_id=$1 or pharmacy_id=$1 order by created_at', [uid]),
+        reminders: await q('select medication,times,end_date from reminders where user_id=$1', [uid]),
+        reviews: await q('select appointment_id,rating,comment,created_at from reviews where patient_id=$1 or doctor_id=$1', [uid]),
+        documents: await q('select id,name,mime,size,created_at from patient_documents where patient_id=$1', [uid]),
+        messages_sent: msgs,
+        assistant_conversations: convs,
+        notifications: await q('select title,body,created_at from notifications where user_id=$1 order by id', [uid]),
+        activity_log: await q('select action,target_type,target_id,created_at from audit_logs where user_id=$1 order by id desc limit 500', [uid]),
+      };
+      await audit('export_data', 'user', uid);
+      return json(data);
+    }
+    if (route('POST', '/me/delete')) {
+      authed();
+      if (user.role === 'admin') throw new HttpError(403, 'Accès refusé');
+      const [cur] = await q('select password_hash from users where id=$1', [user.id]);
+      if (!(await checkPassword(String(body.password || ''), cur.password_hash))) throw new HttpError(401, 'Mot de passe actuel incorrect');
+      await ensureMsgTables();
+      await ensureAvatar();
+      const up = await q(`update appointments set status='cancelled', payment_status=case when payment_status='paid' then 'refund_due' else payment_status end
+        where (patient_id=$1 or doctor_id=$1) and status='scheduled' returning id, patient_id, doctor_id`, [user.id]);
+      for (const a of up) await notify(a.patient_id === user.id ? a.doctor_id : a.patient_id, 'Rendez-vous annulé', "L'autre participant a supprimé son compte.");
+      await q(`update appointment_messages set content='[message supprimé]' where sender_id=$1`, [user.id]);
+      await q('delete from chat_conversations where user_id=$1', [user.id]);
+      await q('delete from reminders where user_id=$1', [user.id]);
+      await q('delete from patient_documents where patient_id=$1', [user.id]);
+      await q('delete from notifications where user_id=$1', [user.id]);
+      await q('delete from password_resets where user_id=$1', [user.id]);
+      await q('update patient_profiles set birth_date=null, allergies=null, antecedents=null where user_id=$1', [user.id]);
+      await q('update doctor_profiles set bio=null where user_id=$1', [user.id]);
+      await q('update pharmacy_profiles set address=null, phone=null, lat=null, lng=null where user_id=$1', [user.id]);
+      await q(`update users set email=$2, full_name='Compte supprimé', phone=null, password_hash=$3, status='deleted', totp_enabled=false, totp_secret=null,
+        avatar=null, avatar_v=0, deleted_at=now(), token_version=token_version+1 where id=$1`,
+        [user.id, `deleted-${user.id}@deleted.invalid`, await hashPassword(randToken())]);
+      await auditSys(user.id, 'account_deleted', 'user', user.id);
+      return json({ ok: true });
+    }
+
+    // ---------- Remboursements et journal (admin) ----------
+    if (route('GET', '/admin/refunds')) {
+      need('admin');
+      return json(await q(`select a.id, a.amount, a.payment_ref, a.starts_at, a.payment_status, pu.full_name patient_name, pu.phone patient_phone, du.full_name doctor_name
+        from appointments a join users pu on pu.id=a.patient_id join users du on du.id=a.doctor_id
+        where a.payment_status in ('refund_due','refunded') order by (a.payment_status='refund_due') desc, a.starts_at desc limit 100`));
+    }
+    if ((p = route('POST', '/admin/refunds/:id/done'))) {
+      need('admin');
+      const r = await q(`update appointments set payment_status='refunded' where id=$1 and payment_status='refund_due' returning id, patient_id, amount`, [p.id]);
+      if (!r.length) throw new HttpError(404, 'Introuvable');
+      await audit('refund_done', 'appointment', p.id);
+      await notify(r[0].patient_id, 'Remboursement effectué', `${r[0].amount} FCFA ont été remboursés.`);
+      return json({ ok: true });
+    }
+    if (route('GET', '/admin/audit')) {
+      need('admin');
+      return json(await q(`select a.id, a.action, a.target_type, a.target_id, a.created_at, u.full_name, u.role
+        from audit_logs a left join users u on u.id=a.user_id order by a.id desc limit 100`));
+    }
+
+    // ---------- Tâche planifiée : rappels de rendez-vous (appelée par GitHub Actions) ----------
+    if (route('POST', '/cron/reminders')) {
+      if (!env.CRON_SECRET || !timingSafeEq(request.headers.get('x-cron-secret'), env.CRON_SECRET)) throw new HttpError(403, 'Refusé');
+      const due = await q(`select a.id, a.starts_at, a.patient_id, a.doctor_id, pu.full_name patient_name, du.full_name doctor_name
+        from appointments a join users pu on pu.id=a.patient_id join users du on du.id=a.doctor_id
+        where a.status='scheduled' and a.reminded_at is null and a.starts_at > now() and a.starts_at <= now() + interval '24 hours' limit 200`);
+      for (const a of due) {
+        await notify(a.patient_id, 'Rappel de rendez-vous', `Consultation avec Dr ${a.doctor_name} le ${fmtD(a.starts_at)}.`);
+        await notify(a.doctor_id, 'Rappel de rendez-vous', `Consultation avec ${a.patient_name} le ${fmtD(a.starts_at)}.`);
+        await q('update appointments set reminded_at=now() where id=$1', [a.id]);
+      }
+      return json({ reminded: due.length });
     }
 
     // ---------- Assistant IA ----------
@@ -798,6 +1135,53 @@ export async function onRequest({ request, env }) {
       await q('insert into chat_messages(conversation_id,role,content) values($1,$2,$3)', [convId, 'user', text]);
       const messages = [{ role: 'system', content: sysPrompt(user) + (body.lang === 'en' ? "\nLANGUE : réponds en anglais (English), même si l'historique est en français." : '') }, ...hist.map((h) => ({ role: h.role, content: h.content })), { role: 'user', content: text }];
       const tools = TOOLS[user.role] || [];
+      if (body.stream === true) {
+        const te = new TextEncoder();
+        const alertTxt = user.role === 'patient' && RED_FLAGS.test(text) ? (body.lang === 'en' ? RED_ALERT_EN : RED_ALERT) : '';
+        const stream = new ReadableStream({
+          async start(ctrl) {
+            const send = (o) => { try { ctrl.enqueue(te.encode(`data: ${JSON.stringify(o)}\n\n`)); } catch (_) { /* client parti */ } };
+            let out = '';
+            try {
+              send({ conversation_id: convId });
+              if (alertTxt) { out += alertTxt; send({ t: alertTxt }); }
+              for (let i = 0; i < 5; i++) {
+                const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', authorization: `Bearer ${env.GROQ_API_KEY}` },
+                  body: JSON.stringify({ model: env.GROQ_MODEL || 'openai/gpt-oss-20b', messages, tools, tool_choice: 'auto', temperature: 0.3, max_tokens: 1000, stream: true }),
+                });
+                if (!r.ok || !r.body) throw new HttpError(502, 'Assistant indisponible');
+                const { content, toolCalls } = await readChatStream(r.body, (tok) => { out += tok; send({ t: tok }); });
+                if (toolCalls.length) {
+                  messages.push({ role: 'assistant', content: content || null, tool_calls: toolCalls });
+                  for (const tc of toolCalls) {
+                    let res;
+                    try { res = await execTool(tc.function.name, JSON.parse(tc.function.arguments || '{}')); }
+                    catch (e) { res = { error: e instanceof HttpError ? e.message : 'Erreur outil' }; }
+                    messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(res).slice(0, 6000) });
+                  }
+                  if (content) { out += '\n\n'; send({ t: '\n\n' }); }
+                  continue;
+                }
+                break;
+              }
+              if (!out.replace(alertTxt, '').trim()) {
+                const fb = "Je n'ai pas pu terminer. Reformulez votre demande.";
+                out += fb;
+                send({ t: fb });
+              }
+              await q('insert into chat_messages(conversation_id,role,content) values($1,$2,$3)', [convId, 'assistant', out.trim()]);
+              send({ done: true, conversation_id: convId });
+            } catch (e) {
+              send({ error: e instanceof HttpError ? e.message : 'Assistant indisponible' });
+            } finally {
+              try { ctrl.close(); } catch (_) { /* déjà fermé */ }
+            }
+          },
+        });
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' } });
+      }
       let reply = '';
       for (let i = 0; i < 5; i++) {
         const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {

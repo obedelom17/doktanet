@@ -22,6 +22,65 @@ class _AuthScreenState extends State<AuthScreen> {
   TextEditingController c(String k) => _c.putIfAbsent(k, () => TextEditingController());
 
   @override
+  void initState() {
+    super.initState();
+    // Lien de réinitialisation reçu par email : https://.../?reset=JETON
+    final t = Uri.base.queryParameters['reset'];
+    if (t != null && t.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _reset(t);
+      });
+    }
+  }
+
+  Future<void> _forgot() async {
+    final em = TextEditingController(text: c('email').text.trim());
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(tr("Mot de passe oublié")),
+        content: SizedBox(
+          width: 380,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(tr("Entrez votre email : nous vous enverrons un lien valable 1 heure.")),
+            const SizedBox(height: 12),
+            tf(em, "Email", type: TextInputType.emailAddress, icon: Icons.mail_outline),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: Text(tr("Envoyer le lien"))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await guard(context, () async {
+      await Api.post('/auth/forgot', {'email': em.text.trim()});
+      if (mounted) toast(context, tr("Si ce compte existe, un email vient d'être envoyé."));
+    });
+  }
+
+  Future<void> _reset(String token) async {
+    final pw = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(tr("Nouveau mot de passe")),
+        content: SizedBox(width: 380, child: tf(pw, "Nouveau mot de passe (8 caractères min.)", obscure: true, icon: Icons.lock_outline)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: Text(tr("Annuler"))),
+          ElevatedButton(onPressed: () => Navigator.pop(d, true), child: Text(tr("Enregistrer"))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await guard(context, () async {
+      await Api.post('/auth/reset', {'token': token, 'password': pw.text});
+      if (mounted) toast(context, tr("Mot de passe modifié. Connectez-vous."));
+    });
+  }
+
+  @override
   void dispose() {
     for (final x in _c.values) {
       x.dispose();
@@ -267,7 +326,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 tf(c('city'), "Ville", icon: Icons.location_city_outlined),
                 tf(c('address'), "Adresse", icon: Icons.place_outlined),
               ],
-              if (reg)
+              if (reg) ...[
                 CheckboxListTile(
                   value: consent,
                   onChanged: (v) => setState(() => consent = v ?? false),
@@ -277,6 +336,11 @@ class _AuthScreenState extends State<AuthScreen> {
                   title: Text(tr("Je consens au traitement de mes données personnelles (loi n°2019-014)."),
                       style: const TextStyle(fontSize: 14)),
                 ),
+                Wrap(spacing: 4, children: [
+                  TextButton(onPressed: () => openLegal('/privacy.html'), child: Text(tr("Politique de confidentialité"))),
+                  TextButton(onPressed: () => openLegal('/terms.html'), child: Text(tr("Conditions d'utilisation"))),
+                ]),
+              ],
             ]),
           ),
           const SizedBox(height: 10),
@@ -287,6 +351,7 @@ class _AuthScreenState extends State<AuthScreen> {
             onPressed: submit,
           ),
           const SizedBox(height: 6),
+          if (!reg) TextButton(onPressed: _forgot, child: Text(tr("Mot de passe oublié ?"))),
           TextButton(
             onPressed: () => setState(() => reg = !reg),
             child: Text(reg ? tr("J'ai déjà un compte") : tr("Créer un compte")),

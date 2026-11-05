@@ -5,7 +5,7 @@ Flutter Web + Cloudflare Pages Functions (API) + Neon (PostgreSQL) + Cloudflare 
 ## Mise en route
 1. Neon : `npm install`, `neon login`, `neon deploy`, `neon env pull` (écrit `.env.local`), puis `npm run db:setup` (schéma + données de test, comptes `*.doktanet.test`, mot de passe `Test1234!`). Sans données de test : `npm run db:schema`. Base déjà créée : `migration_chat.sql` puis `migration_final.sql`.
 2. R2 : optionnel (voir docs/INSTALLATION.md). Sans bloc `[[r2_buckets]]` dans `wrangler.toml`, tout fonctionne.
-3. Pages : créer le projet `doktanet`. Variables (secrets) : `DATABASE_URL`, `JWT_SECRET`, `COMMISSION_PCT`, `PAY_SANDBOX` (`1` en test), `PAY_WEBHOOK_SECRET`, `DAILY_API_KEY` (optionnel), `REQUIRE_2FA` (`1` = 2FA obligatoire médecins/admin), `GROQ_API_KEY`, `GROQ_MODEL` (défaut `openai/gpt-oss-20b`). Lier le bucket R2 au binding `RX_BUCKET`.
+3. Pages : créer le projet `doktanet`. Variables (secrets) : `DATABASE_URL`, `JWT_SECRET`, `DATA_KEY`, `CRON_SECRET`, `RESEND_API_KEY`, `MAIL_FROM`, `PAYGATE_TOKEN`, `REQUIRE_PAYMENT`, `COMMISSION_PCT`, `PAY_SANDBOX` (`1` en test), `PAY_WEBHOOK_SECRET`, `DAILY_API_KEY` (optionnel), `REQUIRE_2FA` (`1` = 2FA obligatoire médecins/admin), `GROQ_API_KEY`, `GROQ_MODEL` (défaut `openai/gpt-oss-20b`). Lier le bucket R2 au binding `RX_BUCKET`.
 4. GitHub : secrets `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Push sur `main` : build Flutter + déploiement automatique.
 5. Admin : créer un compte patient, puis dans Neon : `update users set role='admin', status='active' where email='VOTRE_EMAIL';`
 
@@ -29,11 +29,13 @@ Triage : niveau d'urgence, pistes (hypothèses), jamais de diagnostic ni de dose
 - Patient : inscription immédiate.
 - Médecin / Pharmacien : statut "pending" jusqu'à validation par l'admin.
 
-## Limites connues (à traiter Phase 2)
-- Paiement : mode sandbox. Brancher PayGate / KKiaPay dans `POST /orders/:id/pay` (TODO dans le code) + webhook `POST /api/payments/webhook`.
+## Limites connues
+- Paiement : mode sandbox par défaut. Pour le réel, PayGate Global est branché (`PAYGATE_TOKEN`, `PAY_SANDBOX=0`, webhook vérifié auprès de l'opérateur) mais **non testé contre le service réel** : voir docs/INSTALLATION.md section 8.
 - Vidéo : Jitsi (sans clé) ou Daily.co (si `DAILY_API_KEY`), ouverte dans un nouvel onglet.
-- Pas encore : notifications push des rappels, mode hors-ligne, récupération de mot de passe par email (réinitialisation par l'admin), carte intégrée (lien Google Maps), PDF natif (page imprimable "Enregistrer en PDF").
-- Renderer HTML Flutter : option retirée des versions récentes ; surveiller le poids du bundle (exigence 3G).
+- Hors-ligne : lecture seulement. Les actions (réserver, payer, écrire) demandent une connexion ; elles échouent avec un message clair, rien n'est mis en file d'attente.
+- Notifications : dans l'application et par email. Pas de notification push native du navigateur.
+- La carte utilise les tuiles publiques d'OpenStreetMap (usage modéré) : pour un fort trafic, prendre un fournisseur de tuiles dédié.
+- Le code Flutter de cette version n'a pas pu être compilé dans l'environnement de rédaction (syntaxe vérifiée, API testée par 45 tests) : lancer `flutter build web` et corriger d'éventuelles erreurs de typage avant de déployer.
 
 ## Interface (refonte visuelle) et langues
 - Thème émeraude/or, cartes animées (apparition en cascade, survol), ECG animé, squelettes de chargement, compteurs animés, navigation latérale sur grand écran.
@@ -47,6 +49,22 @@ Triage : niveau d'urgence, pistes (hypothèses), jamais de diagnostic ni de dose
 - Admin : recherche de comptes, mot de passe temporaire, litiges.
 - Mon compte : changement de mot de passe, signalement d'un problème.
 - Guides : dossier `docs/` (installation, patient, médecin, pharmacien, admin).
+
+## Version 2 (sécurité, paiements, RGPD)
+- **Sécurité** : limitation des tentatives de connexion, sessions révocables, mot de passe oublié par email, webhook de paiement authentifié, chiffrement AES-GCM des messages et documents. Détail et limites : `SECURITY.md`.
+- **Rendez-vous** : paiement de la consultation (T-Money/Flooz), reprogrammation, remboursement à l'annulation, avis et notes des médecins, rappels 24 h avant.
+- **Documents** : le patient dépose ses résultats, ses médecins les consultent (journalisé).
+- **Notifications** : cloche dans la barre du haut, emails via Resend.
+- **RGPD** : export JSON, suppression/anonymisation de compte, pages `web/privacy.html` et `web/terms.html`, consentement versionné.
+- **Admin** : onglet Suivi (remboursements, journal d'audit).
+- **Assistant IA** : réponses rendues en Markdown (gras, listes, tableaux), bouton « Signaler ».
+- **Assistant IA en streaming** : la réponse s'affiche au fil de l'eau (flux SSE). Repli automatique sur la réponse complète si le flux est impossible.
+- **Hors-ligne** : service worker (application chargée sans réseau après une première visite) et dernières données mémorisées pour les écrans de lecture (rendez-vous, ordonnances, commandes, rappels, médecins, pharmacies). Bannière « Connexion perdue ». Données mémorisées effacées à la déconnexion.
+- **PDF natif** : ordonnance générée dans l'application (bouton « Télécharger le PDF »), sans page d'impression.
+- **Carte intégrée** : OpenStreetMap dans les pharmacies (vue carte globale et fenêtre par pharmacie).
+- **Dépôt de PDF** : photos ou PDF/images depuis les fichiers (1 Mo, en-tête vérifié côté serveur).
+- **Tests** : `npm test` (13 unitaires, 27 d'intégration sur Postgres en mémoire, 5 sur le service worker), exécutés avant chaque déploiement.
+- Migration : automatique au premier appel, ou `npm run db:migrate` (`migration_v2.sql`).
 
 ## Photos et installation (PWA)
 - Photos : `assets/photos/` (4 images en 2 tailles, ~40 à 110 Ko chacune). Widgets dans `lib/photos.dart` : diaporama de la page de connexion, en-têtes d'accueil (patient, médecin, pharmacien), bandeaux des sections Médecins et Pharmacies. Pour changer une photo : remplacer les fichiers `nom_l.jpg` (grand écran, 1280 px) et `nom_s.jpg` (mobile, 720 px) et ajuster le cadrage dans `Photos`.

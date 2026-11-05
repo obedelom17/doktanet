@@ -1,18 +1,38 @@
 name: deploy
+# Un seul job. Ordre : tests de l'API, build Flutter web, publication sur Cloudflare Pages.
+# Si une étape échoue, rien n'est publié et le site en ligne reste intact.
 on:
   push:
     branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Tests API (45 tests)
+        run: |
+          npm install
+          npm run check:api
+          npm test
       - uses: subosito/flutter-action@v2
         with: { channel: stable }
-      - run: flutter pub get
-      - run: flutter build web --release
-      - run: npm install
-      - uses: cloudflare/wrangler-action@v3
+      - name: Dépendances Flutter
+        run: flutter pub get
+      - name: Build web
+        run: flutter build web --release --pwa-strategy=none --no-web-resources-cdn
+      - name: Poids du bundle
+        run: |
+          du -sh build/web
+          gzip -9 -c build/web/main.dart.js | wc -c | awk '{printf "main.dart.js gzip : %.0f Ko\n", $1/1024}'
+      - name: Publication Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

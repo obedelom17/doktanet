@@ -1,0 +1,76 @@
+name: verification
+# Vérifie une branche (tout sauf main) sans rien déployer : tests, analyse Flutter, build web.
+# Le résultat complet est publié dans la branche "ci-report" (fichier report.txt).
+on:
+  push:
+    branches-ignore: [main, ci-report]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable }
+
+      - name: Tests API
+        id: tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          npm install > /tmp/tests.txt 2>&1
+          npm run check:api >> /tmp/tests.txt 2>&1
+          npm test >> /tmp/tests.txt 2>&1
+
+      - name: Dépendances Flutter
+        id: pub
+        continue-on-error: true
+        shell: bash
+        run: flutter pub get > /tmp/pub.txt 2>&1
+
+      - name: Analyse Flutter
+        id: analyze
+        if: steps.pub.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings > /tmp/analyze.txt 2>&1
+
+      - name: Build web
+        id: build
+        if: steps.pub.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: flutter build web --release --pwa-strategy=none --no-web-resources-cdn > /tmp/build.txt 2>&1
+
+      - name: Publier le rapport
+        if: always()
+        shell: bash
+        env:
+          T: ${{ steps.tests.outcome }}
+          P: ${{ steps.pub.outcome }}
+          A: ${{ steps.analyze.outcome }}
+          B: ${{ steps.build.outcome }}
+        run: |
+          {
+            echo "branche: ${GITHUB_REF_NAME}"
+            echo "commit: ${GITHUB_SHA}"
+            echo "RESULTAT tests=$T pub_get=$P analyse=$A build=$B"
+            echo
+            echo "===== flutter --version ====="
+            flutter --version 2>&1 | head -3
+            echo; echo "===== tests (fin) ====="; tail -n 25 /tmp/tests.txt 2>/dev/null
+            echo; echo "===== pub get ====="; tail -n 40 /tmp/pub.txt 2>/dev/null
+            echo; echo "===== analyse ====="; head -c 40000 /tmp/analyze.txt 2>/dev/null
+            echo; echo "===== build (fin) ====="; tail -n 60 /tmp/build.txt 2>/dev/null
+          } > /tmp/report.txt
+          bash .github/scripts/report.sh "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" /tmp/report.txt
+          if [ "$T" != "success" ] || [ "$P" != "success" ] || [ "$B" != "success" ]; then exit 1; fi
